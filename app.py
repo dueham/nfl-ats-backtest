@@ -58,24 +58,49 @@ st.markdown(f"""
     p, div, span, label {{ color: {CREAM}; font-family: 'Barlow Condensed', Arial, sans-serif; }}
     h1, h2, h3, h4, h5, h6 {{ color: {CREAM}; font-family: 'Barlow Condensed', sans-serif; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }}
 
-    /* ── BOOK COVER HEADER ───────────────────────────────────────────── */
+    /* ── FOOTBALL FIELD HEADER ───────────────────────────────────────── */
     .book-header {{
-        background: {FOREST_MID};
-        border: 1px solid {FOREST_LIGHT};
+        background: {FOREST_DEEP};
+        border: 2px solid {FOREST_LIGHT};
         border-radius: 8px;
-        padding: 28px 32px;
+        padding: 32px 36px;
         margin-bottom: 20px;
         position: relative;
         overflow: hidden;
         font-family: 'Playfair Display', Georgia, serif;
     }}
+    /* Mowed stripes — alternating dark/light green vertical bands */
     .book-header::before {{
         content: '';
         position: absolute;
         inset: 0;
-        opacity: 0.08;
-        background: repeating-linear-gradient(90deg, transparent 0 42px, {MUSTARD} 42px 43px);
+        background:
+          repeating-linear-gradient(90deg,
+            {FOREST_DEEP} 0, {FOREST_DEEP} 60px,
+            #163524 60px, #163524 120px);
         pointer-events: none;
+    }}
+    /* Yard lines — white lines every 60px */
+    .book-header::after {{
+        content: '';
+        position: absolute;
+        inset: 0;
+        background:
+          repeating-linear-gradient(90deg,
+            transparent 0 60px,
+            rgba(245,241,232,0.25) 60px 61px);
+        pointer-events: none;
+    }}
+    /* Bright 50-yard line down the middle */
+    .book-header .yard-50 {{
+        position: absolute;
+        top: 0; bottom: 0;
+        left: 50%;
+        width: 3px;
+        background: rgba(245,241,232,0.55);
+        box-shadow: 0 0 12px rgba(245,241,232,0.2);
+        pointer-events: none;
+        z-index: 1;
     }}
     .book-header .tagline {{
         color: {SAGE};
@@ -83,8 +108,10 @@ st.markdown(f"""
         letter-spacing: 3px;
         margin-bottom: 8px;
         font-family: 'Barlow Condensed', sans-serif;
-        font-weight: 600;
+        font-weight: 700;
         position: relative;
+        z-index: 2;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.7);
     }}
     .book-header h1 {{
         color: {CREAM};
@@ -96,6 +123,8 @@ st.markdown(f"""
         line-height: 1;
         text-transform: none;
         position: relative;
+        z-index: 2;
+        text-shadow: 0 2px 8px rgba(0,0,0,0.6);
     }}
     .book-header .byline {{
         color: {MUSTARD};
@@ -105,11 +134,13 @@ st.markdown(f"""
         letter-spacing: 0.5px;
         font-family: 'Cormorant Garamond', Georgia, serif;
         position: relative;
+        z-index: 2;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.7);
     }}
     .book-header .live-pill {{
         position: absolute;
-        top: 24px;
-        right: 24px;
+        top: 16px;
+        right: 20px;
         background: {BRIGHT_GREEN};
         color: {FOREST_DEEP};
         padding: 4px 12px;
@@ -118,6 +149,7 @@ st.markdown(f"""
         letter-spacing: 2px;
         font-family: 'Barlow Condensed', sans-serif;
         border-radius: 2px;
+        z-index: 3;
     }}
     .book-header .live-pill.warn {{ background: {MUSTARD}; }}
     .book-header .live-pill.off {{ background: {BLOOD_RED}; color: {CREAM}; }}
@@ -428,6 +460,7 @@ def header_banner(live_status: str = "live"):
 
     st.markdown(f"""
     <div class="book-header">
+        <div class="yard-50"></div>
         <div class="tagline">A DATA-DRIVEN NFL ATS SYSTEM</div>
         <h1>MARGIN of VICTORY</h1>
         <div class="byline">by Ron Zellers · Companion App to the Book</div>
