@@ -11,8 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app code
+# Copy app code + assets folder (contains book_banner.jpg)
 COPY app.py .
+COPY assets/ ./assets/
 
 # Create data directory (Railway will mount volume here)
 RUN mkdir -p /data
@@ -21,10 +22,8 @@ RUN mkdir -p /data
 ENV BETS_FILE_PATH=/data/bets.csv
 ENV PYTHONUNBUFFERED=1
 
-# Railway sets PORT env var dynamically
 EXPOSE 8080
 
-# Streamlit config for Railway
 CMD streamlit run app.py \
     --server.port=${PORT:-8080} \
     --server.address=0.0.0.0 \
