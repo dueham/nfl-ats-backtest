@@ -359,6 +359,39 @@ st.markdown(f"""
     .pick-card .metric-value.gold {{ color: {MUSTARD}; }}
     .pick-card .metric-value.cream {{ color: {CREAM}; }}
 
+    /* ── GAME LINE ROW (spread/total/weather) ────────────────────────── */
+    .game-line-row {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 14px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid {FOREST_LIGHT};
+    }}
+    .line-chip {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: {FOREST_DEEP};
+        border: 1px solid {FOREST_LIGHT};
+        border-radius: 2px;
+        padding: 6px 12px;
+        font-family: 'Barlow Condensed', sans-serif;
+    }}
+    .line-chip .line-label {{
+        color: {SAGE};
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 1.5px;
+    }}
+    .line-chip .line-value {{
+        color: {CREAM};
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+    }}
+    .line-chip.weather .line-value {{ color: {MUSTARD}; }}
+
     /* ── ODDS BOARD ──────────────────────────────────────────────────── */
     .odds-grid {{
         display: grid;
@@ -502,6 +535,43 @@ TEAM_NAME_TO_ABBR = {
     "Tennessee Titans": "TEN", "Washington Commanders": "WAS",
 }
 
+# Home stadium coordinates and dome status (for weather lookup)
+# Format: team_abbr -> (lat, lon, is_dome_or_retractable_closed)
+STADIUM_INFO = {
+    "ARI": (33.5276, -112.2626, True),   # State Farm — retractable, usually closed
+    "ATL": (33.7554, -84.4009, True),    # Mercedes-Benz — retractable
+    "BAL": (39.2780, -76.6227, False),
+    "BUF": (42.7738, -78.7870, False),
+    "CAR": (35.2258, -80.8528, False),
+    "CHI": (41.8623, -87.6167, False),
+    "CIN": (39.0955, -84.5161, False),
+    "CLE": (41.5061, -81.6995, False),
+    "DAL": (32.7473, -97.0945, True),    # AT&T — retractable
+    "DEN": (39.7439, -105.0201, False),
+    "DET": (42.3400, -83.0456, True),    # Ford Field — dome
+    "GB":  (44.5013, -88.0622, False),
+    "HOU": (29.6847, -95.4107, True),    # NRG — retractable
+    "IND": (39.7601, -86.1639, True),    # Lucas Oil — retractable
+    "JAX": (30.3239, -81.6373, False),
+    "KC":  (39.0489, -94.4839, False),
+    "LV":  (36.0908, -115.1830, True),   # Allegiant — dome
+    "LAC": (33.9535, -118.3392, False),  # SoFi — open concourse
+    "LA":  (33.9535, -118.3392, False),  # SoFi — open concourse
+    "MIA": (25.9580, -80.2389, False),
+    "MIN": (44.9738, -93.2577, True),    # US Bank — dome
+    "NE":  (42.0909, -71.2643, False),
+    "NO":  (29.9509, -90.0812, True),    # Superdome — dome
+    "NYG": (40.8135, -74.0745, False),
+    "NYJ": (40.8135, -74.0745, False),
+    "PHI": (39.9008, -75.1675, False),
+    "PIT": (40.4468, -80.0158, False),
+    "SF":  (37.4032, -121.9698, False),
+    "SEA": (47.5952, -122.3316, False),
+    "TB":  (27.9759, -82.5033, False),
+    "TEN": (36.1665, -86.7713, False),
+    "WAS": (38.9077, -76.8645, False),
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
 # BET LOG PERSISTENCE (Railway volume)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -576,7 +646,7 @@ def fetch_live_odds() -> pd.DataFrame:
     params = {
         "apiKey": ODDS_API_KEY,
         "regions": "us",
-        "markets": "spreads",
+        "markets": "spreads,totals",
         "oddsFormat": "american",
         "bookmakers": ",".join(PREFERRED_BOOKS + ["betrivers", "pointsbetus"]),
     }
@@ -611,18 +681,28 @@ def fetch_live_odds() -> pd.DataFrame:
             if book_key not in BOOK_DISPLAY:
                 continue
             for market in bm.get("markets", []):
-                if market.get("key") != "spreads":
-                    continue
-                for outcome in market.get("outcomes", []):
-                    team = outcome.get("name")
-                    point = outcome.get("point")
-                    price = outcome.get("price")
-                    if team == home:
-                        row[f"{book_key}_home_spread"] = point
-                        row[f"{book_key}_home_price"] = price
-                    elif team == away:
-                        row[f"{book_key}_away_spread"] = point
-                        row[f"{book_key}_away_price"] = price
+                mkey = market.get("key")
+                if mkey == "spreads":
+                    for outcome in market.get("outcomes", []):
+                        team = outcome.get("name")
+                        point = outcome.get("point")
+                        price = outcome.get("price")
+                        if team == home:
+                            row[f"{book_key}_home_spread"] = point
+                            row[f"{book_key}_home_price"] = price
+                        elif team == away:
+                            row[f"{book_key}_away_spread"] = point
+                            row[f"{book_key}_away_price"] = price
+                elif mkey == "totals":
+                    for outcome in market.get("outcomes", []):
+                        name = outcome.get("name")  # "Over" or "Under"
+                        point = outcome.get("point")
+                        price = outcome.get("price")
+                        if name == "Over":
+                            row[f"{book_key}_total"] = point
+                            row[f"{book_key}_over_price"] = price
+                        elif name == "Under":
+                            row[f"{book_key}_under_price"] = price
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -638,6 +718,105 @@ def consensus_home_spread(row: pd.Series) -> float:
         if col in row and pd.notna(row[col]):
             vals.append(row[col])
     return np.median(vals) if vals else np.nan
+
+
+def consensus_total(row: pd.Series) -> float:
+    vals = []
+    for book in PREFERRED_BOOKS:
+        col = f"{book}_total"
+        if col in row and pd.notna(row[col]):
+            vals.append(row[col])
+    return np.median(vals) if vals else np.nan
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WEATHER FETCH — Open-Meteo (free, no key required)
+# ═══════════════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_weather_for_game(home_abbr: str, kickoff_iso: str) -> dict:
+    """
+    Fetch weather forecast for a game's kickoff time at home stadium.
+    Returns dict with: temp_f, wind_mph, precip_pct, condition, is_dome.
+    Returns {"is_dome": True} for dome/retractable-closed stadiums.
+    """
+    if home_abbr not in STADIUM_INFO:
+        return {}
+    lat, lon, is_dome = STADIUM_INFO[home_abbr]
+    if is_dome:
+        return {"is_dome": True, "condition": "Indoor"}
+    if not kickoff_iso:
+        return {}
+    try:
+        kickoff = pd.to_datetime(kickoff_iso)
+        # Open-Meteo forecast up to 16 days out
+        days_out = (kickoff.normalize() - pd.Timestamp.now().normalize()).days
+        if days_out < 0 or days_out > 15:
+            return {}
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "temperature_2m,precipitation_probability,wind_speed_10m,weather_code",
+            "temperature_unit": "fahrenheit",
+            "wind_speed_unit": "mph",
+            "timezone": "America/New_York",
+            "forecast_days": min(16, days_out + 2),
+        }
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        hourly = data.get("hourly", {})
+        times = pd.to_datetime(hourly.get("time", []))
+        if len(times) == 0:
+            return {}
+        # Find the closest hour to kickoff
+        kickoff_naive = kickoff.tz_localize(None) if kickoff.tzinfo else kickoff
+        # Convert times from ET to naive comparison
+        deltas = abs((times - kickoff_naive).total_seconds())
+        idx = deltas.argmin()
+        temp = hourly["temperature_2m"][idx]
+        wind = hourly["wind_speed_10m"][idx]
+        precip = hourly["precipitation_probability"][idx]
+        wcode = hourly["weather_code"][idx]
+        # Simplify weather code to condition string
+        # https://open-meteo.com/en/docs — WMO codes
+        if wcode == 0: condition = "Clear"
+        elif wcode in (1, 2, 3): condition = "Partly Cloudy"
+        elif wcode in (45, 48): condition = "Fog"
+        elif wcode in (51, 53, 55, 56, 57): condition = "Drizzle"
+        elif wcode in (61, 63, 65, 66, 67): condition = "Rain"
+        elif wcode in (71, 73, 75, 77): condition = "Snow"
+        elif wcode in (80, 81, 82): condition = "Showers"
+        elif wcode in (85, 86): condition = "Snow Showers"
+        elif wcode in (95, 96, 99): condition = "Thunder"
+        else: condition = "—"
+        return {
+            "is_dome": False,
+            "temp_f": round(temp),
+            "wind_mph": round(wind),
+            "precip_pct": int(precip) if precip is not None else 0,
+            "condition": condition,
+        }
+    except Exception:
+        return {}
+
+
+def weather_summary(w: dict) -> str:
+    """Compact one-line weather summary for card display."""
+    if not w:
+        return "—"
+    if w.get("is_dome"):
+        return "🏟️ Indoor"
+    parts = []
+    if "temp_f" in w:
+        parts.append(f"{w['temp_f']}°F")
+    if "condition" in w:
+        parts.append(w["condition"])
+    if w.get("wind_mph", 0) >= 8:
+        parts.append(f"💨 {w['wind_mph']} mph")
+    if w.get("precip_pct", 0) >= 30:
+        parts.append(f"☔ {w['precip_pct']}%")
+    return " · ".join(parts) if parts else "—"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -827,7 +1006,7 @@ with st.sidebar:
     spread_max = st.slider("Spread band — max", 6.0, 17.0, 10.0, 0.5)
     rest_days = st.slider("F3a: Rest advantage (days)", 1, 7, 3, 1)
     late_week = st.slider("F3c: Late season starts week", 10, 17, 14, 1)
-    min_games_seen = st.slider("Min prior games / team", 2, 8, 2, 1)
+    min_games_seen = st.slider("Min prior games / team", 1, 8, 1, 1)
 
     st.markdown("---")
     st.markdown("### Default Bet Config")
@@ -938,6 +1117,7 @@ with mode_picks:
     if is_current_week and len(live_odds) > 0:
         live = live_odds.copy()
         live["spread_line"] = live.apply(consensus_home_spread, axis=1)
+        live["consensus_total"] = live.apply(consensus_total, axis=1)
         live["season"] = selected_season
         live["week"] = selected_week
         live["gameday"] = live["commence_time"]
@@ -965,6 +1145,11 @@ with mode_picks:
             (schedules_all["season"] == selected_season)
             & (schedules_all["week"] == selected_week)
         ].copy()
+        # Fall back — no total available historically in nflverse schedule
+        if "total_line" in week_games.columns:
+            week_games["consensus_total"] = week_games["total_line"]
+        else:
+            week_games["consensus_total"] = np.nan
         odds_by_gameid = {}
 
     if len(week_games) == 0:
@@ -1016,7 +1201,7 @@ with mode_picks:
     </div>
     """, unsafe_allow_html=True)
 
-    def render_pick_card(row, is_watch=False):
+    def render_pick_card(row, is_watch=False, is_not_triggered=False):
         game_date = row.get('gameday', pd.NaT)
         game_date_str = game_date.strftime("%a %m/%d %I:%M %p ET").upper() if pd.notna(game_date) else "TBD"
 
@@ -1024,7 +1209,24 @@ with mode_picks:
         spread_txt = f"{row['sharp_spread']:+.1f}"
         opp_prefix = "VS." if row['sharp_is_home'] else "@"
 
-        card_class = "pick-card watch" if is_watch else "pick-card"
+        # Consensus total (over/under)
+        total_val = row.get("consensus_total", np.nan)
+        total_txt = f"O/U {total_val:.1f}" if pd.notna(total_val) else "O/U —"
+
+        # Weather (fetch on demand — cached)
+        kickoff_iso = ""
+        if pd.notna(game_date):
+            kickoff_iso = game_date.isoformat() if hasattr(game_date, "isoformat") else str(game_date)
+        weather = fetch_weather_for_game(row['home_team'], kickoff_iso)
+        wx = weather_summary(weather)
+
+        # Card class
+        if is_not_triggered:
+            card_class = "pick-card no"
+        elif is_watch:
+            card_class = "pick-card watch"
+        else:
+            card_class = "pick-card"
 
         # Odds board HTML
         game_key = f"{row['home_team']}_{row['away_team']}"
@@ -1048,6 +1250,11 @@ with mode_picks:
                 <div class="pick-time">{game_date_str}</div>
             </div>
             <div class="card-body">
+                <div class="game-line-row">
+                    <span class="line-chip"><span class="line-label">SPREAD</span> <span class="line-value">{spread_txt}</span></span>
+                    <span class="line-chip"><span class="line-label">TOTAL</span> <span class="line-value">{total_txt}</span></span>
+                    <span class="line-chip weather"><span class="line-label">WEATHER</span> <span class="line-value">{wx}</span></span>
+                </div>
                 <div class="metric-row">
                     <div class="metric">
                         <div class="metric-label">EPA EDGE</div>
@@ -1121,41 +1328,65 @@ with mode_picks:
         <h3 style="color:{MUSTARD}; font-family: 'Playfair Display', Georgia, serif;
                    font-weight: 700; letter-spacing: 1px; text-transform: none;
                    font-size: 24px; margin-top: 1.5rem;">
-            ★ Triggered Picks — All 3 Factors Aligned
+            ★ All 3 Triggered — Full Alignment ({n_triggers} games)
         </h3>
         """, unsafe_allow_html=True)
         for _, row in triggers.iterrows():
-            render_pick_card(row, is_watch=False)
+            render_pick_card(row, is_watch=False, is_not_triggered=False)
             render_bet_form(row, "trigger", "trig")
-
-    two_of_three = scored[(scored["factor_score"] == 2) & (scored["trigger_fired"] == 0)]
-    if len(two_of_three) > 0:
+    else:
         st.markdown(f"""
-        <h3 style="color:{SAGE}; font-family: 'Playfair Display', Georgia, serif;
+        <h3 style="color:{MUSTARD}; font-family: 'Playfair Display', Georgia, serif;
                    font-weight: 700; letter-spacing: 1px; text-transform: none;
-                   font-size: 22px; margin-top: 1.5rem;">
-            Watch List — 2 of 3 Factors ({len(two_of_three)} games)
+                   font-size: 24px; margin-top: 1.5rem;">
+            ★ All 3 Triggered — Full Alignment (0 games)
         </h3>
         <p style="color:{CREAM_MUTED}; font-family: 'Cormorant Garamond', Georgia, serif;
-                  font-style: italic; margin-top: -0.5rem;">
-            Historical hit rate around 71% — worth logging if you like the spot.
+                  font-style: italic;">
+            No games fired all three factors this week within the spread band.
         </p>
         """, unsafe_allow_html=True)
-        for _, row in two_of_three.iterrows():
-            render_pick_card(row, is_watch=True)
-            render_bet_form(row, "watch_list", "watch")
 
-    with st.expander(f"FULL SLATE ({len(scored)} GAMES)"):
-        cols = ["gameday", "sharp_side", "location", "opponent",
-                "sharp_spread", "epa_gap_abs", "rest_advantage",
-                "is_divisional", "factor_score", "trigger_fired"]
-        avail = [c for c in cols if c in scored.columns]
-        show = scored[avail].sort_values("factor_score", ascending=False).copy()
-        if "epa_gap_abs" in show.columns:
-            show["epa_gap_abs"] = show["epa_gap_abs"].round(3)
-        if "sharp_spread" in show.columns:
-            show["sharp_spread"] = show["sharp_spread"].round(1)
-        st.dataframe(show, width="stretch", hide_index=True)
+    two_of_three = scored[(scored["factor_score"] == 2) & (scored["trigger_fired"] == 0)]
+    st.markdown(f"""
+    <h3 style="color:{SAGE}; font-family: 'Playfair Display', Georgia, serif;
+               font-weight: 700; letter-spacing: 1px; text-transform: none;
+               font-size: 22px; margin-top: 1.5rem;">
+        2 of 3 Triggered — Watch List ({len(two_of_three)} games)
+    </h3>
+    <p style="color:{CREAM_MUTED}; font-family: 'Cormorant Garamond', Georgia, serif;
+              font-style: italic; margin-top: -0.5rem;">
+        Historical hit rate around 71% — worth logging if you like the spot.
+    </p>
+    """, unsafe_allow_html=True)
+    if len(two_of_three) > 0:
+        for _, row in two_of_three.iterrows():
+            render_pick_card(row, is_watch=True, is_not_triggered=False)
+            render_bet_form(row, "watch_list", "watch")
+    else:
+        st.markdown(f"""
+        <p style="color:{CREAM_MUTED}; font-family: 'Cormorant Garamond', Georgia, serif;
+                  font-style: italic;">
+            No 2-of-3 games this week.
+        </p>
+        """, unsafe_allow_html=True)
+
+    not_triggered = scored[scored["factor_score"] < 2]
+    st.markdown(f"""
+    <h3 style="color:{CREAM_MUTED}; font-family: 'Playfair Display', Georgia, serif;
+               font-weight: 700; letter-spacing: 1px; text-transform: none;
+               font-size: 22px; margin-top: 1.5rem;">
+        Not Triggered ({len(not_triggered)} games)
+    </h3>
+    <p style="color:{CREAM_MUTED}; font-family: 'Cormorant Garamond', Georgia, serif;
+              font-style: italic; margin-top: -0.5rem;">
+        Full slate for reference — factor scores 0 or 1.
+    </p>
+    """, unsafe_allow_html=True)
+    if len(not_triggered) > 0:
+        for _, row in not_triggered.sort_values("factor_score", ascending=False).iterrows():
+            render_pick_card(row, is_watch=False, is_not_triggered=True)
+            render_bet_form(row, "manual", "not")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
