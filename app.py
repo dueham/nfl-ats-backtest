@@ -588,6 +588,81 @@ BET_COLUMNS = [
     "factor_score", "epa_gap", "result", "profit"
 ]
 
+# Weekly picks history — auto-logged every time the picks tab runs.
+# Lives next to bets.csv on the Railway volume so it survives restarts and
+# builds a real track record over time.
+PICKS_FILE = BETS_FILE.parent / "picks_history.csv"
+
+PICKS_COLUMNS = [
+    "logged_at", "season", "week", "game_date",
+    "home_team", "away_team", "sharp_side", "opponent", "location",
+    "sharp_spread", "consensus_total", "epa_gap",
+    "rest_advantage", "is_divisional",
+    "F1_epa", "F2_line_proxy", "F3_situational",
+    "factor_score", "trigger_fired",
+    "ats_result", "cover_margin",  # filled in later once games are settled
+]
+
+
+def load_picks_history() -> pd.DataFrame:
+    if PICKS_FILE.exists():
+        try:
+            df = pd.read_csv(PICKS_FILE)
+            for col in PICKS_COLUMNS:
+                if col not in df.columns:
+                    df[col] = np.nan
+            return df[PICKS_COLUMNS]
+        except Exception:
+            pass
+    return pd.DataFrame(columns=PICKS_COLUMNS)
+
+
+def log_picks_snapshot(scored_df: pd.DataFrame, season: int, week: int):
+    """Save this week's scored games to picks_history.csv if not already logged."""
+    if len(scored_df) == 0:
+        return
+    existing = load_picks_history()
+    # Skip if this season+week already logged
+    if len(existing) > 0:
+        already = (
+            (existing["season"] == season) & (existing["week"] == week)
+        ).any()
+        if already:
+            return
+
+    rows = []
+    now = datetime.now().isoformat(timespec="seconds")
+    for _, row in scored_df.iterrows():
+        rows.append({
+            "logged_at": now,
+            "season": season,
+            "week": week,
+            "game_date": row.get("gameday", pd.NaT),
+            "home_team": row.get("home_team"),
+            "away_team": row.get("away_team"),
+            "sharp_side": row.get("sharp_side"),
+            "opponent": row.get("opponent"),
+            "location": row.get("location"),
+            "sharp_spread": row.get("sharp_spread"),
+            "consensus_total": row.get("consensus_total"),
+            "epa_gap": row.get("epa_gap_abs"),
+            "rest_advantage": row.get("rest_advantage"),
+            "is_divisional": row.get("is_divisional"),
+            "F1_epa": row.get("F1_epa"),
+            "F2_line_proxy": row.get("F2_line_proxy"),
+            "F3_situational": row.get("F3_situational"),
+            "factor_score": row.get("factor_score"),
+            "trigger_fired": row.get("trigger_fired"),
+            "ats_result": np.nan,
+            "cover_margin": np.nan,
+        })
+    new_df = pd.DataFrame(rows)
+    combined = pd.concat([existing, new_df], ignore_index=True)
+    try:
+        combined.to_csv(PICKS_FILE, index=False)
+    except Exception:
+        pass  # non-fatal — don't break the app if writing fails
+
 
 def load_bets() -> pd.DataFrame:
     if BETS_FILE.exists():
@@ -729,6 +804,40 @@ def consensus_total(row: pd.Series) -> float:
     return np.median(vals) if vals else np.nan
 
 
+def filter_odds_to_week(live_odds: pd.DataFrame, schedules_df: pd.DataFrame,
+                        season: int, week: int) -> pd.DataFrame:
+    """
+    Restrict live odds to the games scheduled for the given season+week.
+    The Odds API returns ALL upcoming games it knows about (often several weeks
+    of futures), so we join against the nflverse schedule to keep only the ones
+    that match this week's home/away pairing.
+    """
+    if len(live_odds) == 0:
+        return live_odds
+
+    wk_sched = schedules_df[
+        (schedules_df["season"] == season) & (schedules_df["week"] == week)
+    ][["home_team", "away_team"]].copy()
+
+    if len(wk_sched) == 0:
+        # No schedule to match against — fall back to date-window filter
+        today = pd.Timestamp.now().normalize()
+        cutoff_start = today - pd.Timedelta(days=1)
+        cutoff_end = today + pd.Timedelta(days=8)
+        odds = live_odds.copy()
+        odds["commence_time"] = pd.to_datetime(odds["commence_time"], errors="coerce")
+        return odds[
+            (odds["commence_time"] >= cutoff_start)
+            & (odds["commence_time"] <= cutoff_end)
+        ]
+
+    # Match on home/away abbreviations
+    wk_sched["_key"] = wk_sched["home_team"] + "|" + wk_sched["away_team"]
+    live_odds = live_odds.copy()
+    live_odds["_key"] = live_odds["home_team"] + "|" + live_odds["away_team"]
+    return live_odds[live_odds["_key"].isin(wk_sched["_key"])].drop(columns="_key")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # WEATHER FETCH — Open-Meteo (free, no key required)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -861,6 +970,65 @@ def compute_lagged_epa(seasons_tuple: tuple) -> pd.DataFrame:
     )
     weekly["prior_games_played"] = weekly.groupby(["team", "season"]).cumcount()
     return weekly
+
+
+@st.cache_data(show_spinner=False)
+def compute_smart_epa_for_week(target_season: int, target_week: int,
+                                min_games: int) -> pd.DataFrame:
+    """
+    Return a per-team EPA snapshot appropriate for scoring the target week.
+
+    Logic:
+      - Week 1-2 with min_games >= 2: blend previous season's late-season EPA
+        (weeks 15-18 rolling) as a stand-in for teams that don't yet have
+        the required current-season games.
+      - Week 3+: use current-season lagged EPA only.
+
+    Returns rows shaped like compute_lagged_epa output but tagged with the
+    correct target (season, week) so downstream merge finds them.
+    """
+    # Always compute current-season EPA
+    current_epa = compute_lagged_epa((target_season,))
+    # Slice to the target week
+    current_snapshot = current_epa[
+        (current_epa["season"] == target_season)
+        & (current_epa["week"] == target_week)
+    ].copy()
+
+    # If Week 3+, or user requires min 1 game, return current-season only
+    if target_week >= 3 or min_games < 2:
+        return current_snapshot
+
+    # Weeks 1-2 with min_games >= 2 — pull prior season's late EPA
+    try:
+        prior_epa = compute_lagged_epa((target_season - 1,))
+    except Exception:
+        return current_snapshot
+
+    # Take each team's average EPA over their last 4 games of prior season
+    prior_late = prior_epa[
+        (prior_epa["season"] == target_season - 1)
+        & (prior_epa["week"] >= 15)
+    ]
+    if len(prior_late) == 0:
+        return current_snapshot
+
+    prior_snap = (
+        prior_late.groupby("team")
+        .agg({"net_epa": "mean", "off_epa": "mean", "def_epa": "mean"})
+        .reset_index()
+        .rename(columns={"net_epa": "rolling_net_epa"})
+    )
+    prior_snap["season"] = target_season
+    prior_snap["week"] = target_week
+    prior_snap["prior_games_played"] = 4  # treated as 4 games so it passes min_games=2..4
+
+    # If a team is in both current and prior snapshots, prefer current (has this-year games)
+    have_current = set(current_snapshot["team"].tolist())
+    prior_only = prior_snap[~prior_snap["team"].isin(have_current)]
+
+    combined = pd.concat([current_snapshot, prior_only], ignore_index=True)
+    return combined
 
 
 def get_current_nfl_context(schedules_df: pd.DataFrame) -> tuple:
@@ -1115,7 +1283,18 @@ with mode_picks:
     is_current_week = (selected_season == current_season and selected_week == current_week)
 
     if is_current_week and len(live_odds) > 0:
-        live = live_odds.copy()
+        # Filter to just this week's games (Odds API returns all upcoming)
+        live = filter_odds_to_week(live_odds, schedules_all, selected_season, selected_week)
+        if len(live) == 0:
+            # Fallback: if no schedule match, take date window +/- 8 days
+            live = live_odds.copy()
+            live["commence_time"] = pd.to_datetime(live["commence_time"], errors="coerce")
+            today_ts = pd.Timestamp.now().normalize()
+            live = live[
+                (live["commence_time"] >= today_ts - pd.Timedelta(days=1))
+                & (live["commence_time"] <= today_ts + pd.Timedelta(days=8))
+            ]
+
         live["spread_line"] = live.apply(consensus_home_spread, axis=1)
         live["consensus_total"] = live.apply(consensus_total, axis=1)
         live["season"] = selected_season
@@ -1161,14 +1340,31 @@ with mode_picks:
         seasons_needed.append(selected_season - 1)
     seasons_needed = tuple(sorted(set(seasons_needed)))
 
-    with st.spinner(f"Computing lagged EPA through Week {selected_week - 1}..."):
+    with st.spinner(f"Computing EPA for Week {selected_week}..."):
         try:
-            weekly_epa = compute_lagged_epa(seasons_needed)
+            weekly_epa = compute_smart_epa_for_week(
+                selected_season, selected_week, min_games_seen
+            )
+            # If empty, fall back to standard prior-season compute
+            if len(weekly_epa) == 0:
+                weekly_epa = compute_lagged_epa((selected_season - 1,))
+                # Force season/week to match target so merge works
+                weekly_epa = weekly_epa[
+                    weekly_epa["season"] == selected_season - 1
+                ].copy()
+                weekly_epa["season"] = selected_season
+                weekly_epa["week"] = selected_week
+                st.info(f"Using {selected_season - 1} EPA data as fallback (no {selected_season} data yet).")
         except Exception as e:
             if selected_season > 2020:
                 try:
                     weekly_epa = compute_lagged_epa((selected_season - 1,))
-                    st.warning(f"Using {selected_season - 1} EPA data as fallback.")
+                    weekly_epa = weekly_epa[
+                        weekly_epa["season"] == selected_season - 1
+                    ].copy()
+                    weekly_epa["season"] = selected_season
+                    weekly_epa["week"] = selected_week
+                    st.warning(f"Using {selected_season - 1} EPA data as fallback: {e}")
                 except Exception as e2:
                     st.error(f"EPA load failed: {e2}")
                     st.stop()
@@ -1182,8 +1378,68 @@ with mode_picks:
         require_result=False
     )
 
+    # Auto-log this week's snapshot for track-record persistence (idempotent)
+    if len(scored) > 0 and is_current_week:
+        log_picks_snapshot(scored, selected_season, selected_week)
+
+    # If no games could be scored (e.g. no prior EPA data yet), show a fallback
+    # view of the raw slate so the user still sees matchups + lines + weather.
     if len(scored) == 0:
-        st.warning("No games scored — try lowering 'Min prior games' in sidebar.")
+        st.markdown(f"""
+        <div class="warn-banner">
+            <strong>EPA data unavailable</strong> — showing raw slate. Factor scoring will begin
+            once teams have played prior games this season.
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Build a bare-bones display from week_games with lines + weather only
+        st.markdown(f"""
+        <h3 style="color:{MUSTARD}; font-family: 'Playfair Display', Georgia, serif;
+                   font-weight: 700; text-transform: none; font-size: 24px; margin-top: 1.5rem;">
+            Week {selected_week} Slate ({len(week_games)} games)
+        </h3>
+        """, unsafe_allow_html=True)
+
+        for _, row in week_games.iterrows():
+            home = row.get("home_team", "?")
+            away = row.get("away_team", "?")
+            spread = row.get("spread_line", np.nan)
+            total = row.get("consensus_total", np.nan)
+            gd = row.get("gameday", pd.NaT)
+            gd_str = gd.strftime("%a %m/%d %I:%M %p ET").upper() if pd.notna(gd) else "TBD"
+            spread_txt = f"{spread:+.1f}" if pd.notna(spread) else "—"
+            total_txt = f"O/U {total:.1f}" if pd.notna(total) else "O/U —"
+
+            # Weather
+            kickoff_iso = gd.isoformat() if pd.notna(gd) and hasattr(gd, "isoformat") else ""
+            weather = fetch_weather_for_game(home, kickoff_iso)
+            wx = weather_summary(weather)
+
+            # Odds board
+            game_key = f"{home}_{away}"
+            odds_html = ""
+            if game_key in odds_by_gameid:
+                odds_row_data = pd.Series(odds_by_gameid[game_key])
+                # For unscored view, show home-side lines
+                odds_html = render_odds_board(odds_row_data, home, True)
+
+            st.markdown(f"""
+            <div class="pick-card no">
+                <div class="card-header">
+                    <div class="pick-title">{away} @ {home} <span class="pick-spread">{spread_txt}</span></div>
+                    <div class="pick-time">{gd_str}</div>
+                </div>
+                <div class="card-body">
+                    <div class="game-line-row">
+                        <span class="line-chip"><span class="line-label">SPREAD (HOME)</span> <span class="line-value">{spread_txt}</span></span>
+                        <span class="line-chip"><span class="line-label">TOTAL</span> <span class="line-value">{total_txt}</span></span>
+                        <span class="line-chip weather"><span class="line-label">WEATHER</span> <span class="line-value">{wx}</span></span>
+                    </div>
+                    {odds_html}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
         st.stop()
 
     triggers = scored[scored["trigger_fired"] == 1]
