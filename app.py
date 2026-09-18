@@ -47,6 +47,25 @@ NIGHT_BLACK   = "#050D08"   # Deepest shadow
 # ═══════════════════════════════════════════════════════════════════════════
 # STYLING
 # ═══════════════════════════════════════════════════════════════════════════
+import base64
+
+def _load_banner_b64() -> str:
+    """Load book banner image and return base64-encoded string for embedding."""
+    candidates = [
+        Path(__file__).parent / "assets" / "book_banner.jpg",
+        Path(__file__).parent / "book_banner.jpg",
+        Path("/app/assets/book_banner.jpg"),
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                return base64.b64encode(p.read_bytes()).decode("ascii")
+            except Exception:
+                pass
+    return ""
+
+_BANNER_B64 = _load_banner_b64()
+
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Barlow+Condensed:wght@400;600;700;800&family=Cormorant+Garamond:ital,wght@0,600;1,400&display=swap');
@@ -58,98 +77,78 @@ st.markdown(f"""
     p, div, span, label {{ color: {CREAM}; font-family: 'Barlow Condensed', Arial, sans-serif; }}
     h1, h2, h3, h4, h5, h6 {{ color: {CREAM}; font-family: 'Barlow Condensed', sans-serif; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }}
 
-    /* ── FOOTBALL FIELD HEADER ───────────────────────────────────────── */
+    /* ── BOOK-COVER HEADER (with banner image background) ────────────── */
     .book-header {{
-        background: {FOREST_DEEP};
-        border: 2px solid {FOREST_LIGHT};
+        background-image: url("data:image/jpeg;base64,{_BANNER_B64}");
+        background-size: cover;
+        background-position: center;
+        border: 2px solid {MUSTARD};
         border-radius: 8px;
-        padding: 32px 36px;
+        padding: 48px 40px 40px 40px;
         margin-bottom: 20px;
         position: relative;
         overflow: hidden;
-        font-family: 'Playfair Display', Georgia, serif;
+        min-height: 220px;
     }}
-    /* Mowed stripes — alternating dark/light green vertical bands */
     .book-header::before {{
         content: '';
         position: absolute;
         inset: 0;
-        background:
-          repeating-linear-gradient(90deg,
-            {FOREST_DEEP} 0, {FOREST_DEEP} 60px,
-            #163524 60px, #163524 120px);
+        background: linear-gradient(90deg,
+            rgba(15,40,24,0.85) 0%,
+            rgba(15,40,24,0.55) 45%,
+            rgba(15,40,24,0.25) 100%);
         pointer-events: none;
-    }}
-    /* Yard lines — white lines every 60px */
-    .book-header::after {{
-        content: '';
-        position: absolute;
-        inset: 0;
-        background:
-          repeating-linear-gradient(90deg,
-            transparent 0 60px,
-            rgba(245,241,232,0.25) 60px 61px);
-        pointer-events: none;
-    }}
-    /* Bright 50-yard line down the middle */
-    .book-header .yard-50 {{
-        position: absolute;
-        top: 0; bottom: 0;
-        left: 50%;
-        width: 3px;
-        background: rgba(245,241,232,0.55);
-        box-shadow: 0 0 12px rgba(245,241,232,0.2);
-        pointer-events: none;
-        z-index: 1;
     }}
     .book-header .tagline {{
-        color: {SAGE};
-        font-size: 11px;
-        letter-spacing: 3px;
-        margin-bottom: 8px;
+        color: {MUSTARD};
+        font-size: 12px;
+        letter-spacing: 4px;
+        margin-bottom: 10px;
         font-family: 'Barlow Condensed', sans-serif;
         font-weight: 700;
         position: relative;
         z-index: 2;
-        text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+        text-shadow: 0 2px 6px rgba(0,0,0,0.9);
     }}
     .book-header h1 {{
         color: {CREAM};
         margin: 0;
         font-family: 'Playfair Display', Georgia, serif !important;
-        font-size: 48px;
+        font-size: 56px;
         font-weight: 700;
-        letter-spacing: 1px;
+        letter-spacing: 2px;
         line-height: 1;
         text-transform: none;
         position: relative;
         z-index: 2;
-        text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+        text-shadow: 0 3px 12px rgba(0,0,0,0.9), 0 0 30px rgba(212,165,55,0.3);
     }}
     .book-header .byline {{
         color: {MUSTARD};
-        font-size: 14px;
+        font-size: 16px;
         font-style: italic;
-        margin-top: 12px;
+        margin-top: 14px;
         letter-spacing: 0.5px;
         font-family: 'Cormorant Garamond', Georgia, serif;
         position: relative;
         z-index: 2;
-        text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+        text-shadow: 0 2px 6px rgba(0,0,0,0.9);
     }}
     .book-header .live-pill {{
         position: absolute;
-        top: 16px;
-        right: 20px;
+        top: 20px;
+        right: 24px;
         background: {BRIGHT_GREEN};
         color: {FOREST_DEEP};
-        padding: 4px 12px;
-        font-size: 10px;
+        padding: 5px 14px;
+        font-size: 11px;
         font-weight: 800;
         letter-spacing: 2px;
         font-family: 'Barlow Condensed', sans-serif;
         border-radius: 2px;
         z-index: 3;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.5);
     }}
     .book-header .live-pill.warn {{ background: {MUSTARD}; }}
     .book-header .live-pill.off {{ background: {BLOOD_RED}; color: {CREAM}; }}
@@ -316,10 +315,22 @@ st.markdown(f"""
         border-bottom: 2px solid {MUSTARD};
         padding: 12px 20px;
         display: flex;
-        justify-content: space-between;
         align-items: center;
+        gap: 14px;
     }}
     .pick-card.watch .card-header {{ border-bottom-color: {SAGE}; }}
+    .pick-card.no .card-header {{ border-bottom-color: {FOREST_LIGHT}; }}
+    .pick-card .helmet-logo {{
+        width: 48px;
+        height: 48px;
+        object-fit: contain;
+        flex-shrink: 0;
+        filter: drop-shadow(0 2px 6px rgba(0,0,0,0.5));
+    }}
+    .pick-card .pick-title-block {{
+        flex: 1;
+        min-width: 0;
+    }}
     .pick-card .pick-title {{
         color: {CREAM};
         font-size: 22px;
@@ -329,11 +340,42 @@ st.markdown(f"""
     }}
     .pick-card .pick-spread {{ color: {MUSTARD}; }}
     .pick-card.watch .pick-spread {{ color: {SAGE}; }}
+    .pick-card.no .pick-spread {{ color: {CREAM_MUTED}; }}
     .pick-card .pick-time {{
         color: {SAGE};
         font-size: 12px;
         font-weight: 700;
         letter-spacing: 1px;
+        margin-top: 2px;
+    }}
+    .pick-card .trigger-badge {{
+        padding: 6px 12px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 1.5px;
+        border-radius: 2px;
+        font-family: 'Barlow Condensed', sans-serif;
+        flex-shrink: 0;
+        white-space: nowrap;
+    }}
+    .pick-card .trigger-badge.fired {{
+        background: {MUSTARD};
+        color: {FOREST_DEEP};
+        box-shadow: 0 0 12px rgba(212,165,55,0.4);
+    }}
+    .pick-card .trigger-badge.watch {{
+        background: {SAGE};
+        color: {FOREST_DEEP};
+    }}
+    .pick-card .trigger-badge.miss {{
+        background: transparent;
+        color: {CREAM_MUTED};
+        border: 1px solid {FOREST_LIGHT};
+    }}
+    .pick-card .trigger-badge.unscored {{
+        background: transparent;
+        color: {SAGE};
+        border: 1px dashed {SAGE};
     }}
     .pick-card .card-body {{ padding: 14px 20px; }}
     .pick-card .metric-row {{
@@ -491,15 +533,15 @@ def header_banner(live_status: str = "live"):
     else:
         pill_class, pill_text = "off", "● OFFLINE"
 
-    st.markdown(f"""
-    <div class="book-header">
-        <div class="yard-50"></div>
-        <div class="tagline">A DATA-DRIVEN NFL ATS SYSTEM</div>
-        <h1>MARGIN of VICTORY</h1>
-        <div class="byline">by Ron Zellers · Companion App to the Book</div>
-        <div class="live-pill {pill_class}">{pill_text}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="book-header">'
+        '<div class="tagline">A DATA-DRIVEN NFL ATS SYSTEM</div>'
+        '<h1>MARGIN of VICTORY</h1>'
+        '<div class="byline">by Ron Zellers · Companion App to the Book</div>'
+        f'<div class="live-pill {pill_class}">{pill_text}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -534,6 +576,23 @@ TEAM_NAME_TO_ABBR = {
     "Seattle Seahawks": "SEA", "Tampa Bay Buccaneers": "TB",
     "Tennessee Titans": "TEN", "Washington Commanders": "WAS",
 }
+
+# ESPN team abbreviations differ slightly from nflverse for a few teams
+ESPN_TEAM_MAP = {
+    "LA":  "lar",   # LA Rams
+    "LAC": "lac",
+    "LV":  "lv",
+    "WAS": "wsh",
+    "JAX": "jax",
+}
+
+
+def team_helmet_url(team_abbr: str) -> str:
+    """Return ESPN CDN URL for a team's helmet logo."""
+    if not team_abbr:
+        return ""
+    espn = ESPN_TEAM_MAP.get(team_abbr, team_abbr.lower())
+    return f"https://a.espncdn.com/i/teamlogos/nfl/500/{espn}.png"
 
 # Home stadium coordinates and dome status (for weather lookup)
 # Format: team_abbr -> (lat, lon, is_dome_or_retractable_closed)
@@ -1146,13 +1205,14 @@ def render_odds_board(row: pd.Series, sharp_team_abbr: str, sharp_is_home: bool)
         cls = "odds-tile best" if is_best else "odds-tile"
         book_disp = BOOK_DISPLAY.get(book, book.upper())
         star = ' ★ BEST' if is_best else ''
-        tiles.append(f"""
-            <div class="{cls}">
-                <div class="odds-book">{book_disp}{star}</div>
-                <div class="odds-line">{sp:+.1f}</div>
-                <div class="odds-price">{int(pr):+d}</div>
-            </div>
-        """)
+        tile = (
+            f'<div class="{cls}">'
+                f'<div class="odds-book">{book_disp}{star}</div>'
+                f'<div class="odds-line">{sp:+.1f}</div>'
+                f'<div class="odds-price">{int(pr):+d}</div>'
+            '</div>'
+        )
+        tiles.append(tile)
     return f'<div class="odds-grid">{"".join(tiles)}</div>'
 
 
@@ -1385,20 +1445,20 @@ with mode_picks:
     # If no games could be scored (e.g. no prior EPA data yet), show a fallback
     # view of the raw slate so the user still sees matchups + lines + weather.
     if len(scored) == 0:
-        st.markdown(f"""
-        <div class="warn-banner">
-            <strong>EPA data unavailable</strong> — showing raw slate. Factor scoring will begin
-            once teams have played prior games this season.
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Build a bare-bones display from week_games with lines + weather only
-        st.markdown(f"""
-        <h3 style="color:{MUSTARD}; font-family: 'Playfair Display', Georgia, serif;
-                   font-weight: 700; text-transform: none; font-size: 24px; margin-top: 1.5rem;">
-            Week {selected_week} Slate ({len(week_games)} games)
-        </h3>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            '<div class="warn-banner">'
+            '<strong>EPA data unavailable</strong> — showing raw slate. Factor scoring will begin '
+            'once teams have played prior games this season.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<h3 style="color:{MUSTARD}; font-family: \'Playfair Display\', Georgia, serif; '
+            f'font-weight: 700; text-transform: none; font-size: 24px; margin-top: 1.5rem;">'
+            f'Week {selected_week} Slate ({len(week_games)} games)'
+            f'</h3>',
+            unsafe_allow_html=True,
+        )
 
         for _, row in week_games.iterrows():
             home = row.get("home_team", "?")
@@ -1410,35 +1470,44 @@ with mode_picks:
             spread_txt = f"{spread:+.1f}" if pd.notna(spread) else "—"
             total_txt = f"O/U {total:.1f}" if pd.notna(total) else "O/U —"
 
-            # Weather
             kickoff_iso = gd.isoformat() if pd.notna(gd) and hasattr(gd, "isoformat") else ""
             weather = fetch_weather_for_game(home, kickoff_iso)
             wx = weather_summary(weather)
 
-            # Odds board
             game_key = f"{home}_{away}"
             odds_html = ""
             if game_key in odds_by_gameid:
                 odds_row_data = pd.Series(odds_by_gameid[game_key])
-                # For unscored view, show home-side lines
                 odds_html = render_odds_board(odds_row_data, home, True)
 
-            st.markdown(f"""
-            <div class="pick-card no">
-                <div class="card-header">
-                    <div class="pick-title">{away} @ {home} <span class="pick-spread">{spread_txt}</span></div>
-                    <div class="pick-time">{gd_str}</div>
-                </div>
-                <div class="card-body">
-                    <div class="game-line-row">
-                        <span class="line-chip"><span class="line-label">SPREAD (HOME)</span> <span class="line-value">{spread_txt}</span></span>
-                        <span class="line-chip"><span class="line-label">TOTAL</span> <span class="line-value">{total_txt}</span></span>
-                        <span class="line-chip weather"><span class="line-label">WEATHER</span> <span class="line-value">{wx}</span></span>
-                    </div>
-                    {odds_html}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            # Helmet — show home team helmet in fallback view
+            helmet_url = team_helmet_url(home)
+            helmet_html = (
+                f'<img src="{helmet_url}" class="helmet-logo" alt="{home}"/>'
+                if helmet_url else ""
+            )
+
+            card_html = (
+                '<div class="pick-card no">'
+                    '<div class="card-header">'
+                        f'{helmet_html}'
+                        '<div class="pick-title-block">'
+                            f'<div class="pick-title">{away} @ {home} <span class="pick-spread">{spread_txt}</span></div>'
+                            f'<div class="pick-time">{gd_str}</div>'
+                        '</div>'
+                        '<div class="trigger-badge unscored">UNSCORED</div>'
+                    '</div>'
+                    '<div class="card-body">'
+                        '<div class="game-line-row">'
+                            f'<span class="line-chip"><span class="line-label">SPREAD (HOME)</span> <span class="line-value">{spread_txt}</span></span>'
+                            f'<span class="line-chip"><span class="line-label">TOTAL</span> <span class="line-value">{total_txt}</span></span>'
+                            f'<span class="line-chip weather"><span class="line-label">WEATHER</span> <span class="line-value">{wx}</span></span>'
+                        '</div>'
+                        f'{odds_html}'
+                    '</div>'
+                '</div>'
+            )
+            st.markdown(card_html, unsafe_allow_html=True)
 
         st.stop()
 
@@ -1460,36 +1529,39 @@ with mode_picks:
     def render_pick_card(row, is_watch=False, is_not_triggered=False):
         game_date = row.get('gameday', pd.NaT)
         game_date_str = game_date.strftime("%a %m/%d %I:%M %p ET").upper() if pd.notna(game_date) else "TBD"
-
-        # Spread text with sharp side perspective
         spread_txt = f"{row['sharp_spread']:+.1f}"
         opp_prefix = "VS." if row['sharp_is_home'] else "@"
-
-        # Consensus total (over/under)
         total_val = row.get("consensus_total", np.nan)
         total_txt = f"O/U {total_val:.1f}" if pd.notna(total_val) else "O/U —"
 
-        # Weather (fetch on demand — cached)
         kickoff_iso = ""
         if pd.notna(game_date):
             kickoff_iso = game_date.isoformat() if hasattr(game_date, "isoformat") else str(game_date)
         weather = fetch_weather_for_game(row['home_team'], kickoff_iso)
         wx = weather_summary(weather)
 
-        # Card class
         if is_not_triggered:
             card_class = "pick-card no"
+            badge_class = "trigger-badge miss"
+            badge_text = f"{int(row['factor_score'])}/3 · NO TRIGGER"
         elif is_watch:
             card_class = "pick-card watch"
+            badge_class = "trigger-badge watch"
+            badge_text = "2/3 · WATCH"
         else:
             card_class = "pick-card"
+            badge_class = "trigger-badge fired"
+            badge_text = "★ 3/3 · TRIGGERED"
 
-        # Odds board HTML
         game_key = f"{row['home_team']}_{row['away_team']}"
         odds_html = ""
         if game_key in odds_by_gameid:
             odds_row = pd.Series(odds_by_gameid[game_key])
             odds_html = render_odds_board(odds_row, row['sharp_side'], row['sharp_is_home'])
+
+        # Helmet — sharp side only
+        helmet_url = team_helmet_url(row['sharp_side'])
+        helmet_html = f'<img src="{helmet_url}" class="helmet-logo" alt="{row["sharp_side"]}"/>' if helmet_url else ""
 
         # Factor chips
         f1_c = "on" if row['F1_epa'] else "off"
@@ -1499,41 +1571,46 @@ with mode_picks:
         f2_s = "✓" if row['F2_line_proxy'] else "✗"
         f3_s = "✓" if row['F3_situational'] else "✗"
 
-        st.markdown(f"""
-        <div class="{card_class}">
-            <div class="card-header">
-                <div class="pick-title">{row['sharp_side']} <span class="pick-spread">{spread_txt}</span> {opp_prefix} {row['opponent']}</div>
-                <div class="pick-time">{game_date_str}</div>
-            </div>
-            <div class="card-body">
-                <div class="game-line-row">
-                    <span class="line-chip"><span class="line-label">SPREAD</span> <span class="line-value">{spread_txt}</span></span>
-                    <span class="line-chip"><span class="line-label">TOTAL</span> <span class="line-value">{total_txt}</span></span>
-                    <span class="line-chip weather"><span class="line-label">WEATHER</span> <span class="line-value">{wx}</span></span>
-                </div>
-                <div class="metric-row">
-                    <div class="metric">
-                        <div class="metric-label">EPA EDGE</div>
-                        <div class="metric-value edge">+{row['epa_gap_abs']:.3f}</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">REST ADV</div>
-                        <div class="metric-value gold">{int(row['rest_advantage']):+d} DAYS</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">DIV GAME</div>
-                        <div class="metric-value cream">{'YES' if row['is_divisional'] else 'NO'}</div>
-                    </div>
-                </div>
-                {odds_html}
-                <div class="factor-row">
-                    <span class="factor-chip {f1_c}">F1 EPA {f1_s}</span>
-                    <span class="factor-chip {f2_c}">F2 LINE {f2_s}</span>
-                    <span class="factor-chip {f3_c}">F3 SIT {f3_s}</span>
-                </div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_html = (
+            f'<div class="{card_class}">'
+                '<div class="card-header">'
+                    f'{helmet_html}'
+                    '<div class="pick-title-block">'
+                        f'<div class="pick-title">{row["sharp_side"]} <span class="pick-spread">{spread_txt}</span> {opp_prefix} {row["opponent"]}</div>'
+                        f'<div class="pick-time">{game_date_str}</div>'
+                    '</div>'
+                    f'<div class="{badge_class}">{badge_text}</div>'
+                '</div>'
+                '<div class="card-body">'
+                    '<div class="game-line-row">'
+                        f'<span class="line-chip"><span class="line-label">SPREAD</span> <span class="line-value">{spread_txt}</span></span>'
+                        f'<span class="line-chip"><span class="line-label">TOTAL</span> <span class="line-value">{total_txt}</span></span>'
+                        f'<span class="line-chip weather"><span class="line-label">WEATHER</span> <span class="line-value">{wx}</span></span>'
+                    '</div>'
+                    '<div class="metric-row">'
+                        '<div class="metric">'
+                            '<div class="metric-label">EPA EDGE</div>'
+                            f'<div class="metric-value edge">+{row["epa_gap_abs"]:.3f}</div>'
+                        '</div>'
+                        '<div class="metric">'
+                            '<div class="metric-label">REST ADV</div>'
+                            f'<div class="metric-value gold">{int(row["rest_advantage"]):+d} DAYS</div>'
+                        '</div>'
+                        '<div class="metric">'
+                            '<div class="metric-label">DIV GAME</div>'
+                            f'<div class="metric-value cream">{"YES" if row["is_divisional"] else "NO"}</div>'
+                        '</div>'
+                    '</div>'
+                    f'{odds_html}'
+                    '<div class="factor-row">'
+                        f'<span class="factor-chip {f1_c}">F1 EPA {f1_s}</span>'
+                        f'<span class="factor-chip {f2_c}">F2 LINE {f2_s}</span>'
+                        f'<span class="factor-chip {f3_c}">F3 SIT {f3_s}</span>'
+                    '</div>'
+                '</div>'
+            '</div>'
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
 
     def render_bet_form(row, source, key_prefix):
         with st.expander(f"LOG BET ON {row['sharp_side']}"):
@@ -1700,19 +1777,23 @@ with mode_track:
                 """, unsafe_allow_html=True)
                 for _, bet in pending.iterrows():
                     bet_id = int(bet["bet_id"])
-                    st.markdown(f"""
-                    <div class="pick-card">
-                        <div class="card-header">
-                            <div class="pick-title">{bet['sharp_side']} <span class="pick-spread">{bet['spread']:+.1f}</span> {bet['location']} {bet['opponent']}</div>
-                            <div class="pick-time">{bet.get('game_date', '')}</div>
-                        </div>
-                        <div class="card-body">
-                            <p style="color:{CREAM}; margin:0;">
-                                <strong style="color:{MUSTARD};">${bet['amount']:.0f}</strong> @ {int(bet['odds'])} · {bet['book']} · Source: <em style="color:{SAGE}; font-family:'Cormorant Garamond',serif;">{bet['bet_source']}</em>
-                            </p>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    pending_card = (
+                        '<div class="pick-card">'
+                            '<div class="card-header">'
+                                '<div class="pick-title-block">'
+                                    f'<div class="pick-title">{bet["sharp_side"]} <span class="pick-spread">{bet["spread"]:+.1f}</span> {bet["location"]} {bet["opponent"]}</div>'
+                                    f'<div class="pick-time">{bet.get("game_date", "")}</div>'
+                                '</div>'
+                                '<div class="trigger-badge miss">PENDING</div>'
+                            '</div>'
+                            '<div class="card-body">'
+                                f'<p style="color:{CREAM}; margin:0;">'
+                                    f'<strong style="color:{MUSTARD};">${bet["amount"]:.0f}</strong> @ {int(bet["odds"])} · {bet["book"]} · Source: <em style="color:{SAGE}; font-family:\'Cormorant Garamond\',serif;">{bet["bet_source"]}</em>'
+                                '</p>'
+                            '</div>'
+                        '</div>'
+                    )
+                    st.markdown(pending_card, unsafe_allow_html=True)
                     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
                     with c1:
                         if st.button("✓ WIN", key=f"win_{bet_id}", width="stretch"):
