@@ -377,6 +377,37 @@ st.markdown(f"""
         color: {SAGE};
         border: 1px dashed {SAGE};
     }}
+
+    /* ── QB INJURY BADGES ───────────────────────────────────────────── */
+    .qb-status-row {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 10px 0 4px 0;
+    }}
+    .qb-badge {{
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 1px;
+        border-radius: 2px;
+        font-family: 'Barlow Condensed', sans-serif;
+        text-transform: uppercase;
+    }}
+    .qb-badge.dq {{
+        background: {BLOOD_RED};
+        color: {CREAM};
+    }}
+    .qb-badge.warn {{
+        background: {MUSTARD};
+        color: {FOREST_DEEP};
+    }}
+    .pick-card.dq-override {{
+        border-color: {BLOOD_RED};
+    }}
+    .pick-card.dq-override .card-header {{
+        border-bottom-color: {BLOOD_RED};
+    }}
     .pick-card .card-body {{ padding: 14px 20px; }}
     .pick-card .metric-row {{
         display: flex;
@@ -550,6 +581,234 @@ def header_banner(live_status: str = "live"):
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "").strip()
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTHENTICATION SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════
+import json
+import hashlib
+import secrets
+
+USERS_FILE = Path(os.environ.get("USERS_FILE_PATH", "/data/users.json"))
+if not USERS_FILE.parent.exists():
+    USERS_FILE = Path("users.json")
+else:
+    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _hash_password(password: str, salt: str = None) -> tuple:
+    """
+    Hash password using PBKDF2-HMAC-SHA256 with random salt.
+    Returns (hash_hex, salt_hex). If bcrypt is available we'd use that, but
+    PBKDF2 is stdlib and secure enough for a small user base.
+    """
+    if salt is None:
+        salt = secrets.token_hex(16)
+    salt_bytes = bytes.fromhex(salt)
+    # 200,000 iterations is 2024-2026 recommended baseline
+    hash_bytes = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt_bytes, 200_000
+    )
+    return hash_bytes.hex(), salt
+
+
+def _verify_password(password: str, hash_hex: str, salt_hex: str) -> bool:
+    """Constant-time comparison to prevent timing attacks."""
+    try:
+        candidate, _ = _hash_password(password, salt_hex)
+        return secrets.compare_digest(candidate, hash_hex)
+    except Exception:
+        return False
+
+
+def load_users() -> dict:
+    """Load users from disk. Auto-creates admin from env vars on first run."""
+    users = {}
+    if USERS_FILE.exists():
+        try:
+            with open(USERS_FILE, "r") as f:
+                users = json.load(f)
+        except Exception:
+            users = {}
+
+    # First-run bootstrap: create admin from environment variables
+    admin_username = os.environ.get("ADMIN_USERNAME", "").strip()
+    admin_password = os.environ.get("ADMIN_INITIAL_PASSWORD", "").strip()
+    if admin_username and admin_password and admin_username not in users:
+        h, s = _hash_password(admin_password)
+        users[admin_username] = {
+            "password_hash": h,
+            "salt": s,
+            "role": "admin",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "last_login": None,
+        }
+        save_users(users)
+    return users
+
+
+def save_users(users: dict):
+    """Persist users to disk."""
+    try:
+        with open(USERS_FILE, "w") as f:
+            json.dump(users, f, indent=2)
+    except Exception as e:
+        st.error(f"Failed to save users: {e}")
+
+
+def add_user(username: str, password: str, role: str = "subscriber") -> tuple:
+    """Add a new user. Returns (success, message)."""
+    username = username.strip().lower()
+    if not username or not password:
+        return False, "Username and password required."
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters."
+    if role not in ("admin", "subscriber"):
+        return False, "Invalid role."
+    users = load_users()
+    if username in users:
+        return False, f"User '{username}' already exists."
+    h, s = _hash_password(password)
+    users[username] = {
+        "password_hash": h,
+        "salt": s,
+        "role": role,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "last_login": None,
+    }
+    save_users(users)
+    return True, f"User '{username}' created as {role}."
+
+
+def remove_user(username: str) -> tuple:
+    """Remove a user. Returns (success, message)."""
+    username = username.strip().lower()
+    users = load_users()
+    if username not in users:
+        return False, f"User '{username}' does not exist."
+    if users[username]["role"] == "admin":
+        # Prevent removing the last admin
+        admin_count = sum(1 for u in users.values() if u["role"] == "admin")
+        if admin_count <= 1:
+            return False, "Cannot remove the last admin."
+    del users[username]
+    save_users(users)
+    return True, f"User '{username}' removed."
+
+
+def reset_password(username: str, new_password: str) -> tuple:
+    """Reset a user's password. Returns (success, message)."""
+    username = username.strip().lower()
+    if len(new_password) < 8:
+        return False, "Password must be at least 8 characters."
+    users = load_users()
+    if username not in users:
+        return False, f"User '{username}' does not exist."
+    h, s = _hash_password(new_password)
+    users[username]["password_hash"] = h
+    users[username]["salt"] = s
+    save_users(users)
+    return True, f"Password reset for '{username}'."
+
+
+def authenticate(username: str, password: str) -> dict:
+    """Return user dict on success, empty dict on failure."""
+    username = username.strip().lower()
+    users = load_users()
+    if username not in users:
+        return {}
+    user = users[username]
+    if not _verify_password(password, user["password_hash"], user["salt"]):
+        return {}
+    # Update last login
+    users[username]["last_login"] = datetime.now().isoformat(timespec="seconds")
+    save_users(users)
+    return {
+        "username": username,
+        "role": user["role"],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LOGIN PAGE
+# ═══════════════════════════════════════════════════════════════════════════
+def render_login_page():
+    """Render the full-screen login page. Sets st.session_state on success."""
+    # Login-page-specific CSS
+    st.markdown(
+        f'<style>'
+        f'.login-container {{ max-width: 480px; margin: 40px auto; }}'
+        f'.login-brand {{ text-align: center; margin-bottom: 32px; }}'
+        f'.login-brand .tag {{ color: {MUSTARD}; font-size: 12px; letter-spacing: 4px;'
+        f'                     font-family: "Barlow Condensed", sans-serif; font-weight: 700; }}'
+        f'.login-brand h1 {{ color: {CREAM}; font-family: "Playfair Display", Georgia, serif !important;'
+        f'                   font-size: 56px; margin: 8px 0 0 0; letter-spacing: 2px;'
+        f'                   text-shadow: 0 0 30px rgba(212,165,55,0.4); text-transform: none; }}'
+        f'.login-brand .sub {{ color: {SAGE}; font-size: 12px; letter-spacing: 3px;'
+        f'                     font-family: "Barlow Condensed", sans-serif; font-weight: 700;'
+        f'                     margin-top: 8px; }}'
+        f'.login-card {{ background: {FOREST_MID}; border: 2px solid {MUSTARD};'
+        f'               border-radius: 8px; padding: 32px 36px;'
+        f'               box-shadow: 0 0 40px rgba(212,165,55,0.25); }}'
+        f'.login-card h2 {{ color: {CREAM}; font-family: "Barlow Condensed", sans-serif;'
+        f'                  font-size: 18px; letter-spacing: 3px; text-align: center;'
+        f'                  margin: 0 0 20px 0; }}'
+        f'.login-footer {{ text-align: center; margin-top: 20px; color: {CREAM_MUTED};'
+        f'                 font-family: "Cormorant Garamond", serif; font-style: italic;'
+        f'                 font-size: 14px; }}'
+        f'.login-footer strong {{ color: {MUSTARD}; }}'
+        f'</style>',
+        unsafe_allow_html=True,
+    )
+
+    header_banner("live" if ODDS_API_KEY else "warn")
+
+    st.markdown(
+        '<div class="login-brand">'
+        '<div class="tag">COMPLIMENTARY ACCESS</div>'
+        '<h1>Margin of Victory</h1>'
+        '<div class="sub">3-FACTOR NFL ATS SYSTEM</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Use columns to center the login card
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        st.markdown('<div class="login-card">', unsafe_allow_html=True)
+        st.markdown('<h2>SIGN IN TO YOUR ACCOUNT</h2>', unsafe_allow_html=True)
+
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("Username", placeholder="Enter your username", key="login_user")
+            password = st.text_input("Password", type="password", placeholder="Enter your password", key="login_pass")
+            submitted = st.form_submit_button("SIGN IN", width="stretch")
+
+        if submitted:
+            result = authenticate(username, password)
+            if result:
+                st.session_state["auth_user"] = result["username"]
+                st.session_state["auth_role"] = result["role"]
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        with st.expander("Don't have an account? Request Access"):
+            st.markdown(
+                f'<p style="color:{CREAM}; font-family: \'Cormorant Garamond\', serif;">'
+                f'Contact <strong style="color:{MUSTARD};">Ron Zellers</strong> directly to request access. '
+                f'Access is granted on a case-by-case basis.'
+                f'</p>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        f'<p class="login-footer">by <strong>Ron Zellers</strong> · Companion App to the Book</p>',
+        unsafe_allow_html=True,
+    )
+
+
+
 PREFERRED_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars"]
 BOOK_DISPLAY = {
     "draftkings": "DK", "fanduel": "FD",
@@ -641,7 +900,7 @@ else:
     BETS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 BET_COLUMNS = [
-    "bet_id", "logged_at", "season", "week", "game_date",
+    "bet_id", "user", "logged_at", "season", "week", "game_date",
     "sharp_side", "opponent", "location", "spread", "amount",
     "odds", "book", "bet_source",
     "factor_score", "epa_gap", "result", "profit"
@@ -659,6 +918,7 @@ PICKS_COLUMNS = [
     "rest_advantage", "is_divisional",
     "F1_epa", "F2_line_proxy", "F3_situational",
     "factor_score", "trigger_fired",
+    "sharp_qb_starter", "sharp_qb_status", "qb_disqualified",
     "ats_result", "cover_margin",  # filled in later once games are settled
 ]
 
@@ -692,6 +952,7 @@ def log_picks_snapshot(scored_df: pd.DataFrame, season: int, week: int):
     rows = []
     now = datetime.now().isoformat(timespec="seconds")
     for _, row in scored_df.iterrows():
+        sqb = row.get("sharp_qb_info", {}) or {}
         rows.append({
             "logged_at": now,
             "season": season,
@@ -712,6 +973,9 @@ def log_picks_snapshot(scored_df: pd.DataFrame, season: int, week: int):
             "F3_situational": row.get("F3_situational"),
             "factor_score": row.get("factor_score"),
             "trigger_fired": row.get("trigger_fired"),
+            "sharp_qb_starter": sqb.get("starter"),
+            "sharp_qb_status": sqb.get("status"),
+            "qb_disqualified": row.get("qb_disqualified", 0),
             "ats_result": np.nan,
             "cover_margin": np.nan,
         })
@@ -904,22 +1168,33 @@ def filter_odds_to_week(live_odds: pd.DataFrame, schedules_df: pd.DataFrame,
 def fetch_weather_for_game(home_abbr: str, kickoff_iso: str) -> dict:
     """
     Fetch weather forecast for a game's kickoff time at home stadium.
-    Returns dict with: temp_f, wind_mph, precip_pct, condition, is_dome.
-    Returns {"is_dome": True} for dome/retractable-closed stadiums.
+    Returns dict with: temp_f, wind_mph, precip_pct, condition, is_dome, or
+    {"error": "reason"} for debuggability.
     """
+    if not home_abbr:
+        return {"error": "no_team"}
     if home_abbr not in STADIUM_INFO:
-        return {}
+        return {"error": f"unknown_team:{home_abbr}"}
     lat, lon, is_dome = STADIUM_INFO[home_abbr]
     if is_dome:
         return {"is_dome": True, "condition": "Indoor"}
     if not kickoff_iso:
-        return {}
+        return {"error": "no_kickoff"}
+
     try:
-        kickoff = pd.to_datetime(kickoff_iso)
-        # Open-Meteo forecast up to 16 days out
-        days_out = (kickoff.normalize() - pd.Timestamp.now().normalize()).days
-        if days_out < 0 or days_out > 15:
-            return {}
+        # Parse kickoff — could be naive OR tz-aware
+        kickoff = pd.to_datetime(kickoff_iso, utc=True, errors="coerce")
+        if pd.isna(kickoff):
+            return {"error": "bad_kickoff"}
+        # Convert to ET so it matches Open-Meteo's timezone param
+        kickoff_et = kickoff.tz_convert("America/New_York").tz_localize(None)
+
+        days_out = (kickoff_et.normalize() - pd.Timestamp.now().normalize()).days
+        if days_out < -1:
+            return {"error": f"past_game:{days_out}d"}
+        if days_out > 15:
+            return {"error": f"too_far:{days_out}d"}
+
         url = "https://api.open-meteo.com/v1/forecast"
         params = {
             "latitude": lat,
@@ -928,26 +1203,29 @@ def fetch_weather_for_game(home_abbr: str, kickoff_iso: str) -> dict:
             "temperature_unit": "fahrenheit",
             "wind_speed_unit": "mph",
             "timezone": "America/New_York",
-            "forecast_days": min(16, days_out + 2),
+            "forecast_days": max(2, min(16, days_out + 2)),
         }
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         hourly = data.get("hourly", {})
-        times = pd.to_datetime(hourly.get("time", []))
-        if len(times) == 0:
-            return {}
-        # Find the closest hour to kickoff
-        kickoff_naive = kickoff.tz_localize(None) if kickoff.tzinfo else kickoff
-        # Convert times from ET to naive comparison
-        deltas = abs((times - kickoff_naive).total_seconds())
-        idx = deltas.argmin()
-        temp = hourly["temperature_2m"][idx]
-        wind = hourly["wind_speed_10m"][idx]
-        precip = hourly["precipitation_probability"][idx]
-        wcode = hourly["weather_code"][idx]
-        # Simplify weather code to condition string
-        # https://open-meteo.com/en/docs — WMO codes
+        time_strings = hourly.get("time", [])
+        if not time_strings:
+            return {"error": "no_hourly_data"}
+
+        # Open-Meteo returns local-time strings like "2026-09-21T13:00"
+        times = pd.to_datetime(time_strings)  # naive local time (ET)
+
+        # Find closest hour to kickoff (both are ET-naive now)
+        deltas = (times - kickoff_et).total_seconds().abs()
+        idx = int(deltas.argmin())
+
+        temp = hourly.get("temperature_2m", [None])[idx]
+        wind = hourly.get("wind_speed_10m", [None])[idx]
+        precip = hourly.get("precipitation_probability", [None])[idx]
+        wcode = hourly.get("weather_code", [None])[idx]
+
+        # WMO code → simple label
         if wcode == 0: condition = "Clear"
         elif wcode in (1, 2, 3): condition = "Partly Cloudy"
         elif wcode in (45, 48): condition = "Fog"
@@ -958,33 +1236,139 @@ def fetch_weather_for_game(home_abbr: str, kickoff_iso: str) -> dict:
         elif wcode in (85, 86): condition = "Snow Showers"
         elif wcode in (95, 96, 99): condition = "Thunder"
         else: condition = "—"
+
         return {
             "is_dome": False,
-            "temp_f": round(temp),
-            "wind_mph": round(wind),
+            "temp_f": round(temp) if temp is not None else None,
+            "wind_mph": round(wind) if wind is not None else None,
             "precip_pct": int(precip) if precip is not None else 0,
             "condition": condition,
         }
-    except Exception:
-        return {}
+    except Exception as e:
+        return {"error": f"fetch_failed:{type(e).__name__}"}
 
 
 def weather_summary(w: dict) -> str:
     """Compact one-line weather summary for card display."""
     if not w:
         return "—"
+    if w.get("error"):
+        # Surface the error briefly so we can see what's wrong
+        return f"(no fx: {w['error']})"
     if w.get("is_dome"):
         return "🏟️ Indoor"
     parts = []
-    if "temp_f" in w:
+    if w.get("temp_f") is not None:
         parts.append(f"{w['temp_f']}°F")
-    if "condition" in w:
+    if w.get("condition"):
         parts.append(w["condition"])
-    if w.get("wind_mph", 0) >= 8:
+    if w.get("wind_mph") is not None and w["wind_mph"] >= 1:
         parts.append(f"💨 {w['wind_mph']} mph")
-    if w.get("precip_pct", 0) >= 30:
+    if w.get("precip_pct", 0) >= 10:
         parts.append(f"☔ {w['precip_pct']}%")
     return " · ".join(parts) if parts else "—"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QB INJURY STATUS — ESPN public API
+# ═══════════════════════════════════════════════════════════════════════════
+# ESPN team IDs (needed for their roster/injury endpoint)
+ESPN_TEAM_IDS = {
+    "ARI": 22, "ATL": 1,  "BAL": 33, "BUF": 2,  "CAR": 29,
+    "CHI": 3,  "CIN": 4,  "CLE": 5,  "DAL": 6,  "DEN": 7,
+    "DET": 8,  "GB":  9,  "HOU": 34, "IND": 11, "JAX": 30,
+    "KC":  12, "LV":  13, "LAC": 24, "LA":  14, "MIA": 15,
+    "MIN": 16, "NE":  17, "NO":  18, "NYG": 19, "NYJ": 20,
+    "PHI": 21, "PIT": 23, "SF":  25, "SEA": 26, "TB":  27,
+    "TEN": 10, "WAS": 28,
+}
+
+# Statuses that DISQUALIFY a trigger (starter can't play or is very unlikely to)
+DQ_STATUSES = {"Out", "Doubtful", "Injured Reserve", "Suspended", "Physically Unable to Perform"}
+# Statuses to flag for visibility but not disqualify
+FLAG_STATUSES = {"Questionable"}
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_team_qb_status(team_abbr: str) -> dict:
+    """
+    Return {'starter': name, 'status': designation, 'flag': 'dq'|'warn'|None}
+    for a team's starting QB using ESPN's public depth chart + injuries endpoints.
+    """
+    tid = ESPN_TEAM_IDS.get(team_abbr)
+    if not tid:
+        return {}
+    try:
+        # Get roster; look for QB position
+        url = f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/{tid}/roster"
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        qbs = []
+        for group in data.get("athletes", []):
+            if group.get("position") == "offense":
+                for a in group.get("items", []):
+                    pos = a.get("position", {}).get("abbreviation", "")
+                    if pos == "QB":
+                        qbs.append(a)
+        if not qbs:
+            return {}
+
+        # Get injuries for this team
+        inj_url = f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/{tid}/injuries"
+        try:
+            ir = requests.get(inj_url, timeout=15)
+            ir.raise_for_status()
+            injuries = ir.json().get("injuries", [])
+        except Exception:
+            injuries = []
+
+        # Build a lookup: athlete id -> status
+        inj_lookup = {}
+        for inj_group in injuries:
+            for item in inj_group.get("injuries", []):
+                athlete_id = str(item.get("athlete", {}).get("id", ""))
+                status = item.get("status", "")
+                inj_lookup[athlete_id] = status
+
+        # Starter QB = first in roster listing (ESPN orders by depth chart)
+        starter = qbs[0]
+        starter_id = str(starter.get("id", ""))
+        starter_name = starter.get("displayName", "Unknown")
+        status = inj_lookup.get(starter_id, "")
+
+        # Classify
+        flag = None
+        if status in DQ_STATUSES:
+            flag = "dq"
+        elif status in FLAG_STATUSES:
+            flag = "warn"
+
+        return {
+            "starter": starter_name,
+            "status": status if status else "Healthy",
+            "flag": flag,
+        }
+    except Exception:
+        return {}
+
+
+def qb_status_badge_html(qb_info: dict, side_label: str) -> str:
+    """Return small HTML badge if there's a concern; empty string otherwise."""
+    if not qb_info or not qb_info.get("flag"):
+        return ""
+    flag = qb_info["flag"]
+    status = qb_info.get("status", "")
+    starter = qb_info.get("starter", "QB")
+    if flag == "dq":
+        cls = "qb-badge dq"
+        icon = "❌"
+        label = f"{starter.split()[-1]} {status.upper()}"
+    else:
+        cls = "qb-badge warn"
+        icon = "⚠️"
+        label = f"{starter.split()[-1]} Q"
+    return f'<span class="{cls}">{icon} {side_label}: {label}</span>'
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1217,67 +1601,131 @@ def render_odds_board(row: pd.Series, sharp_team_abbr: str, sharp_is_home: bool)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SIDEBAR
+# AUTH GATE
+# ═══════════════════════════════════════════════════════════════════════════
+if "auth_user" not in st.session_state:
+    render_login_page()
+    st.stop()
+
+# Identify current user
+current_user = st.session_state["auth_user"]
+current_role = st.session_state["auth_role"]
+is_admin = (current_role == "admin")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SIDEBAR — admin sees full controls; subscriber sees minimal info
 # ═══════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown(f"""
-    <div style="font-family: 'Playfair Display', Georgia, serif; color: {MUSTARD};
-                font-size: 22px; font-weight: 700; letter-spacing: 1px;
-                border-bottom: 2px solid {FOREST_LIGHT}; padding-bottom: 12px; margin-bottom: 16px;">
-        The Almanac
-    </div>
-    """, unsafe_allow_html=True)
+    # Everyone sees this — user info + logout
+    st.markdown(
+        f'<div style="font-family: \'Playfair Display\', Georgia, serif; color: {MUSTARD};'
+        f'font-size: 22px; font-weight: 700; letter-spacing: 1px;'
+        f'border-bottom: 2px solid {FOREST_LIGHT}; padding-bottom: 12px; margin-bottom: 16px;">'
+        f'The Almanac'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("### Factor Thresholds")
-    epa_threshold = st.slider("F1: Net EPA Gap min", 0.05, 0.25, 0.12, 0.01)
-    spread_min = st.slider("Spread band — min", 1.0, 7.0, 3.0, 0.5)
-    spread_max = st.slider("Spread band — max", 6.0, 17.0, 10.0, 0.5)
-    rest_days = st.slider("F3a: Rest advantage (days)", 1, 7, 3, 1)
-    late_week = st.slider("F3c: Late season starts week", 10, 17, 14, 1)
-    min_games_seen = st.slider("Min prior games / team", 1, 8, 1, 1)
+    st.markdown(
+        f'<div style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+        f'letter-spacing:1px; margin-bottom:8px;">'
+        f'SIGNED IN: <strong style="color:{MUSTARD};">{current_user.upper()}</strong><br>'
+        f'ROLE: <strong style="color:{BRIGHT_GREEN if is_admin else SAGE};">{current_role.upper()}</strong>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("---")
-    st.markdown("### Default Bet Config")
-    default_amount = st.number_input("Bet amount ($)", value=100.0, step=10.0, min_value=1.0)
-    default_odds = st.number_input("Odds (American)", value=-110, step=5)
-    default_book = st.text_input("Sportsbook", value="DraftKings")
-
-    st.markdown("---")
-    st.markdown("### API Status")
-    if ODDS_API_KEY:
-        remaining = st.session_state.get("odds_api_remaining", "?")
-        used = st.session_state.get("odds_api_used", "?")
-        st.markdown(f"""
-        <div style="color:{BRIGHT_GREEN}; font-size:0.85rem; font-family: 'Barlow Condensed', sans-serif; letter-spacing:1px;">
-            ✓ ODDS API ACTIVE<br>
-            USED: {used} / REMAINING: {remaining}
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown(f"""
-        <div style="color:{BLOOD_RED}; font-size:0.85rem; font-family: 'Barlow Condensed', sans-serif; letter-spacing:1px;">
-            ⚠ ODDS API DISABLED<br>
-            SET ODDS_API_KEY
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("---")
-    if st.button("REFRESH LIVE ODDS", width="stretch"):
-        st.cache_data.clear()
+    if st.button("SIGN OUT", width="stretch"):
+        for key in ["auth_user", "auth_role"]:
+            if key in st.session_state:
+                del st.session_state[key]
         st.rerun()
+
+    st.markdown("---")
+
+    if is_admin:
+        # ADMIN-ONLY: threshold sliders + API status + refresh button
+        st.markdown("### Factor Thresholds")
+        epa_threshold = st.slider("F1: Net EPA Gap min", 0.05, 0.25, 0.12, 0.01)
+        spread_min = st.slider("Spread band — min", 1.0, 7.0, 3.0, 0.5)
+        spread_max = st.slider("Spread band — max", 6.0, 17.0, 10.0, 0.5)
+        rest_days = st.slider("F3a: Rest advantage (days)", 1, 7, 3, 1)
+        late_week = st.slider("F3c: Late season starts week", 10, 17, 14, 1)
+        min_games_seen = st.slider("Min prior games / team", 1, 8, 1, 1)
+
+        st.markdown("---")
+        st.markdown("### Default Bet Config")
+        default_amount = st.number_input("Bet amount ($)", value=100.0, step=10.0, min_value=1.0)
+        default_odds = st.number_input("Odds (American)", value=-110, step=5)
+        default_book = st.text_input("Sportsbook", value="DraftKings")
+
+        st.markdown("---")
+        st.markdown("### API Status")
+        if ODDS_API_KEY:
+            remaining = st.session_state.get("odds_api_remaining", "?")
+            used = st.session_state.get("odds_api_used", "?")
+            st.markdown(
+                f'<div style="color:{BRIGHT_GREEN}; font-size:0.85rem;'
+                f'font-family: \'Barlow Condensed\', sans-serif; letter-spacing:1px;">'
+                f'✓ ODDS API ACTIVE<br>'
+                f'USED: {used} / REMAINING: {remaining}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div style="color:{BLOOD_RED}; font-size:0.85rem;'
+                f'font-family: \'Barlow Condensed\', sans-serif; letter-spacing:1px;">'
+                f'⚠ ODDS API DISABLED<br>SET ODDS_API_KEY'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+        if st.button("REFRESH LIVE ODDS", width="stretch"):
+            st.cache_data.clear()
+            st.rerun()
+    else:
+        # SUBSCRIBER: fixed system config, minimal display
+        # Use the SAME defaults the admin sliders default to
+        epa_threshold = 0.12
+        spread_min = 3.0
+        spread_max = 10.0
+        rest_days = 3
+        late_week = 14
+        min_games_seen = 1
+
+        st.markdown("### Default Bet Config")
+        default_amount = st.number_input("Bet amount ($)", value=100.0, step=10.0, min_value=1.0)
+        default_odds = st.number_input("Odds (American)", value=-110, step=5)
+        default_book = st.text_input("Sportsbook", value="DraftKings")
+
+        st.markdown("---")
+        st.markdown(
+            f'<div style="color:{SAGE}; font-family: \'Cormorant Garamond\', serif;'
+            f'font-style: italic; font-size: 13px;">'
+            f'System settings and odds refresh are controlled by admin.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 # ═══════════════════════════════════════════════════════════════════════════
 # HEADER + TABS
 # ═══════════════════════════════════════════════════════════════════════════
-# Determine header status early
 has_odds_key = bool(ODDS_API_KEY)
 header_banner("live" if has_odds_key else "warn")
 
-mode_picks, mode_track, mode_bt = st.tabs([
-    "THIS WEEK'S PICKS",
-    "BET TRACKING",
-    "HISTORICAL BACKTEST"
-])
+# Build tabs list — admin gets an extra Admin panel tab
+tab_labels = ["THIS WEEK'S PICKS", "BET TRACKING", "HISTORICAL BACKTEST"]
+if is_admin:
+    tab_labels.append("⚙️ ADMIN")
+
+_tabs = st.tabs(tab_labels)
+mode_picks = _tabs[0]
+mode_track = _tabs[1]
+mode_bt = _tabs[2]
+mode_admin = _tabs[3] if is_admin else None
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MODE 1 — THIS WEEK'S PICKS
@@ -1438,6 +1886,31 @@ with mode_picks:
         require_result=False
     )
 
+    # QB injury filter — current-week live only (don't disturb backtest)
+    scored["sharp_qb_info"] = [{} for _ in range(len(scored))]
+    scored["opp_qb_info"] = [{} for _ in range(len(scored))]
+    scored["qb_disqualified"] = 0
+
+    if is_current_week and len(scored) > 0:
+        with st.spinner("Checking QB injury status..."):
+            # Only fetch QB info for teams that could be triggers or watch (2+ factors)
+            teams_to_check = set()
+            candidates = scored[scored["factor_score"] >= 2]
+            for _, r in candidates.iterrows():
+                teams_to_check.add(r["sharp_side"])
+                teams_to_check.add(r["opponent"])
+            qb_cache = {t: fetch_team_qb_status(t) for t in teams_to_check}
+
+        for idx, r in scored.iterrows():
+            sharp_qb = qb_cache.get(r["sharp_side"], {})
+            opp_qb = qb_cache.get(r["opponent"], {})
+            scored.at[idx, "sharp_qb_info"] = sharp_qb
+            scored.at[idx, "opp_qb_info"] = opp_qb
+            # DQ only when sharp side has starter Out/Doubtful/etc AND it was a trigger
+            if sharp_qb.get("flag") == "dq" and r["trigger_fired"] == 1:
+                scored.at[idx, "qb_disqualified"] = 1
+                scored.at[idx, "trigger_fired"] = 0  # remove from triggers
+
     # Auto-log this week's snapshot for track-record persistence (idempotent)
     if len(scored) > 0 and is_current_week:
         log_picks_snapshot(scored, selected_season, selected_week)
@@ -1512,7 +1985,9 @@ with mode_picks:
         st.stop()
 
     triggers = scored[scored["trigger_fired"] == 1]
+    dq_triggers = scored[scored.get("qb_disqualified", 0) == 1] if "qb_disqualified" in scored.columns else pd.DataFrame()
     n_triggers = len(triggers)
+    n_dq = len(dq_triggers)
 
     if n_triggers > 0:
         msg = f"★ {n_triggers} TRIGGER{'S' if n_triggers != 1 else ''} FIRED"
@@ -1563,6 +2038,26 @@ with mode_picks:
         helmet_url = team_helmet_url(row['sharp_side'])
         helmet_html = f'<img src="{helmet_url}" class="helmet-logo" alt="{row["sharp_side"]}"/>' if helmet_url else ""
 
+        # QB status badges (sharp side + opponent)
+        sharp_qb = row.get("sharp_qb_info", {}) or {}
+        opp_qb = row.get("opp_qb_info", {}) or {}
+        qb_badges = []
+        sharp_badge = qb_status_badge_html(sharp_qb, row["sharp_side"])
+        opp_badge = qb_status_badge_html(opp_qb, row["opponent"])
+        if sharp_badge:
+            qb_badges.append(sharp_badge)
+        if opp_badge:
+            qb_badges.append(opp_badge)
+        qb_row_html = ""
+        if qb_badges:
+            qb_row_html = '<div class="qb-status-row">' + "".join(qb_badges) + '</div>'
+
+        # Card class — apply dq-override styling if QB knocked out a trigger
+        was_dq = row.get("qb_disqualified", 0) == 1
+        if was_dq:
+            card_class = "pick-card no dq-override"
+            badge_class = "trigger-badge miss"
+            badge_text = "❌ QB OUT · DQ"
         # Factor chips
         f1_c = "on" if row['F1_epa'] else "off"
         f2_c = "on" if row['F2_line_proxy'] else "off"
@@ -1582,6 +2077,7 @@ with mode_picks:
                     f'<div class="{badge_class}">{badge_text}</div>'
                 '</div>'
                 '<div class="card-body">'
+                    f'{qb_row_html}'
                     '<div class="game-line-row">'
                         f'<span class="line-chip"><span class="line-label">SPREAD</span> <span class="line-value">{spread_txt}</span></span>'
                         f'<span class="line-chip"><span class="line-label">TOTAL</span> <span class="line-value">{total_txt}</span></span>'
@@ -1637,6 +2133,7 @@ with mode_picks:
                     game_date = row.get('gameday', pd.NaT)
                     game_date_str = game_date.strftime("%a %m/%d") if pd.notna(game_date) else "TBD"
                     add_bet({
+                        "user": current_user,
                         "season": selected_season,
                         "week": selected_week,
                         "game_date": game_date_str,
@@ -1680,7 +2177,24 @@ with mode_picks:
         </p>
         """, unsafe_allow_html=True)
 
-    two_of_three = scored[(scored["factor_score"] == 2) & (scored["trigger_fired"] == 0)]
+    # DQ'd triggers — full alignment but QB scratched
+    if n_dq > 0:
+        st.markdown(f"""
+        <h3 style="color:{BLOOD_RED}; font-family: 'Playfair Display', Georgia, serif;
+                   font-weight: 700; letter-spacing: 1px; text-transform: none;
+                   font-size: 22px; margin-top: 1.5rem;">
+            ❌ Disqualified by QB Injury ({n_dq} games)
+        </h3>
+        <p style="color:{CREAM_MUTED}; font-family: 'Cormorant Garamond', Georgia, serif;
+                  font-style: italic; margin-top: -0.5rem;">
+            These games hit all 3 factors but the sharp side's starting QB is Out or Doubtful — EPA data is stale, do not bet.
+        </p>
+        """, unsafe_allow_html=True)
+        for _, row in dq_triggers.iterrows():
+            render_pick_card(row, is_watch=False, is_not_triggered=True)
+            render_bet_form(row, "manual", "dq")
+
+    two_of_three = scored[(scored["factor_score"] == 2) & (scored["trigger_fired"] == 0) & (scored.get("qb_disqualified", 0) == 0)]
     st.markdown(f"""
     <h3 style="color:{SAGE}; font-family: 'Playfair Display', Georgia, serif;
                font-weight: 700; letter-spacing: 1px; text-transform: none;
@@ -1704,7 +2218,10 @@ with mode_picks:
         </p>
         """, unsafe_allow_html=True)
 
-    not_triggered = scored[scored["factor_score"] < 2]
+    not_triggered = scored[
+        (scored["factor_score"] < 2)
+        & (scored.get("qb_disqualified", 0) == 0)
+    ]
     st.markdown(f"""
     <h3 style="color:{CREAM_MUTED}; font-family: 'Playfair Display', Georgia, serif;
                font-weight: 700; letter-spacing: 1px; text-transform: none;
@@ -1727,6 +2244,21 @@ with mode_picks:
 # ═══════════════════════════════════════════════════════════════════════════
 with mode_track:
     bets_df = load_bets()
+
+    # Scope: subscribers only see their own bets; admin sees everyone's
+    if not is_admin:
+        bets_df = bets_df[bets_df["user"] == current_user].copy()
+
+    # Show scope banner
+    if is_admin and len(bets_df) > 0:
+        all_users = bets_df["user"].dropna().unique().tolist()
+        st.markdown(
+            f'<div class="info-banner">'
+            f'<strong>ADMIN VIEW:</strong> Showing bets across {len(all_users)} user(s): '
+            f'{", ".join(sorted(all_users))}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     if len(bets_df) == 0:
         st.markdown(f"""
@@ -1832,10 +2364,16 @@ with mode_track:
                 All {len(bets_df)} Bets
             </h3>
             """, unsafe_allow_html=True)
-            display_cols = ["logged_at", "season", "week", "game_date",
-                            "sharp_side", "opponent", "spread",
-                            "amount", "odds", "book", "bet_source",
-                            "factor_score", "result", "profit"]
+            if is_admin:
+                display_cols = ["logged_at", "user", "season", "week", "game_date",
+                                "sharp_side", "opponent", "spread",
+                                "amount", "odds", "book", "bet_source",
+                                "factor_score", "result", "profit"]
+            else:
+                display_cols = ["logged_at", "season", "week", "game_date",
+                                "sharp_side", "opponent", "spread",
+                                "amount", "odds", "book", "bet_source",
+                                "factor_score", "result", "profit"]
             show = bets_df[[c for c in display_cols if c in bets_df.columns]].copy()
             show = show.sort_values("logged_at", ascending=False)
             st.dataframe(show, width="stretch", hide_index=True, height=400)
@@ -2115,6 +2653,133 @@ with mode_bt:
                 "Hit Rate": f"{rate:.1%}" if not pd.isna(rate) else "—"
             })
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MODE 4 — ADMIN PANEL (admin only)
+# ═══════════════════════════════════════════════════════════════════════════
+if is_admin and mode_admin is not None:
+    with mode_admin:
+        st.markdown(
+            f'<h3 style="color:{MUSTARD}; font-family: \'Playfair Display\', serif; text-transform: none;">'
+            f'User Management'
+            f'</h3>',
+            unsafe_allow_html=True,
+        )
+
+        users = load_users()
+
+        # ── User list
+        if users:
+            user_rows = []
+            for uname, u in users.items():
+                user_rows.append({
+                    "Username": uname,
+                    "Role": u.get("role", ""),
+                    "Created": u.get("created_at", "—")[:10] if u.get("created_at") else "—",
+                    "Last Login": u.get("last_login", "—")[:16] if u.get("last_login") else "Never",
+                })
+            st.dataframe(pd.DataFrame(user_rows), width="stretch", hide_index=True)
+
+        st.markdown("---")
+
+        # ── Add new user
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px;">ADD NEW USER</h4>',
+            unsafe_allow_html=True,
+        )
+        with st.form("add_user_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns([2, 2, 1])
+            with c1:
+                new_username = st.text_input("Username", key="new_username")
+            with c2:
+                new_password = st.text_input("Password (min 8 chars)", type="password", key="new_password")
+            with c3:
+                new_role = st.selectbox("Role", ["subscriber", "admin"], key="new_role")
+            if st.form_submit_button("ADD USER", width="stretch"):
+                ok, msg = add_user(new_username, new_password, new_role)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+        st.markdown("---")
+
+        # ── Reset password
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px;">RESET USER PASSWORD</h4>',
+            unsafe_allow_html=True,
+        )
+        with st.form("reset_pw_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns([2, 2, 1])
+            with c1:
+                reset_user = st.selectbox("User", sorted(users.keys()) if users else [], key="reset_user")
+            with c2:
+                reset_pw = st.text_input("New password", type="password", key="reset_pw")
+            with c3:
+                st.write("")
+                st.write("")
+                if st.form_submit_button("RESET", width="stretch"):
+                    ok, msg = reset_password(reset_user, reset_pw)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+        st.markdown("---")
+
+        # ── Remove user
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px;">REMOVE USER</h4>',
+            unsafe_allow_html=True,
+        )
+        removable = [u for u in users if u != current_user]  # can't remove self
+        with st.form("remove_user_form", clear_on_submit=True):
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                remove_target = st.selectbox("User to remove", sorted(removable) if removable else [],
+                                              key="remove_target")
+            with c2:
+                st.write("")
+                st.write("")
+                if st.form_submit_button("REMOVE", width="stretch"):
+                    if remove_target:
+                        ok, msg = remove_user(remove_target)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+        st.markdown("---")
+
+        # ── User activity: bets per user
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px;">USER ACTIVITY</h4>',
+            unsafe_allow_html=True,
+        )
+        all_bets = load_bets()
+        if len(all_bets) > 0 and "user" in all_bets.columns:
+            all_bets["profit_num"] = pd.to_numeric(all_bets["profit"], errors="coerce")
+            activity = all_bets.groupby("user", dropna=False).agg(
+                Bets=("bet_id", "count"),
+                Wins=("result", lambda x: (x == "WIN").sum()),
+                Losses=("result", lambda x: (x == "LOSS").sum()),
+                Wagered=("amount", "sum"),
+                Profit=("profit_num", "sum"),
+            ).reset_index()
+            activity["Profit"] = activity["Profit"].apply(
+                lambda x: f"${x:,.0f}" if pd.notna(x) else "—"
+            )
+            activity["Wagered"] = activity["Wagered"].apply(lambda x: f"${x:,.0f}")
+            st.dataframe(activity, width="stretch", hide_index=True)
+        else:
+            st.info("No bet activity yet.")
 
 
 st.markdown("---")
