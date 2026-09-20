@@ -1217,8 +1217,8 @@ def fetch_weather_for_game(home_abbr: str, kickoff_iso: str) -> dict:
         times = pd.to_datetime(time_strings)  # naive local time (ET)
 
         # Find closest hour to kickoff (both are ET-naive now)
-        deltas = (times - kickoff_et).total_seconds().abs()
-        idx = int(deltas.argmin())
+        deltas = np.abs((times - kickoff_et).total_seconds())
+        idx = int(np.argmin(deltas))
 
         temp = hourly.get("temperature_2m", [None])[idx]
         wind = hourly.get("wind_speed_10m", [None])[idx]
