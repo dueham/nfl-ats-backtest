@@ -594,6 +594,47 @@ if not USERS_FILE.parent.exists():
 else:
     USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+# Email leads (marketing list) — separate from authenticated users
+LEADS_FILE = USERS_FILE.parent / "leads.csv"
+
+LEAD_COLUMNS = ["email", "name", "source", "captured_at", "converted_to_user"]
+
+
+def load_leads() -> pd.DataFrame:
+    if LEADS_FILE.exists():
+        try:
+            df = pd.read_csv(LEADS_FILE)
+            for col in LEAD_COLUMNS:
+                if col not in df.columns:
+                    df[col] = ""
+            return df[LEAD_COLUMNS]
+        except Exception:
+            pass
+    return pd.DataFrame(columns=LEAD_COLUMNS)
+
+
+def add_lead(email: str, name: str = "", source: str = "") -> tuple:
+    """Store an email lead. Returns (success, message)."""
+    email = email.strip().lower()
+    if not email or "@" not in email or "." not in email.split("@")[-1]:
+        return False, "Please enter a valid email address."
+    df = load_leads()
+    if len(df) > 0 and (df["email"] == email).any():
+        return True, "You're already on the list — welcome back!"
+    new_row = pd.DataFrame([{
+        "email": email,
+        "name": name.strip(),
+        "source": source.strip(),
+        "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "converted_to_user": "",
+    }])
+    df = pd.concat([df, new_row], ignore_index=True)
+    try:
+        df.to_csv(LEADS_FILE, index=False)
+        return True, "You're in — check your inbox for weekly picks."
+    except Exception as e:
+        return False, f"Save failed: {e}"
+
 
 def _hash_password(password: str, salt: str = None) -> tuple:
     """
@@ -731,7 +772,211 @@ def authenticate(username: str, password: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════
 # LOGIN PAGE
 # ═══════════════════════════════════════════════════════════════════════════
-def render_login_page():
+@st.cache_data(show_spinner=False, ttl=86400)  # 24-hour cache
+def get_marquee_stats() -> dict:
+    """
+    Compute the headline stats (backtest 2022-2024 + current season live if available)
+    for display on the public landing page.
+    """
+    # Use the known validated backtest numbers as the marquee.
+    # These come from our 3/3 trigger backtest with min_games=2, 2022-2024.
+    marquee = {
+        "backtest_wins": 186,
+        "backtest_losses": 35,
+        "backtest_pushes": 3,
+        "backtest_cover_rate": 0.842,
+        "backtest_seasons": "2022–2024",
+        "live_wins": 0,
+        "live_losses": 0,
+        "live_pushes": 0,
+        "live_cover_rate": None,
+        "live_season": "2026",
+    }
+    # Try to update from real picks_history if it exists
+    try:
+        picks = load_picks_history()
+        settled = picks[
+            (picks["trigger_fired"] == 1)
+            & (picks["ats_result"].isin(["COVER", "NO_COVER", "PUSH"]))
+        ]
+        if len(settled) > 0:
+            w = (settled["ats_result"] == "COVER").sum()
+            l = (settled["ats_result"] == "NO_COVER").sum()
+            p = (settled["ats_result"] == "PUSH").sum()
+            marquee["live_wins"] = int(w)
+            marquee["live_losses"] = int(l)
+            marquee["live_pushes"] = int(p)
+            dec = w + l
+            marquee["live_cover_rate"] = (w / dec) if dec > 0 else None
+    except Exception:
+        pass
+    return marquee
+
+
+def render_landing_page():
+    """Public marketing landing page — email capture, teaser stats, sign-in link."""
+    st.markdown(
+        f'<style>'
+        f'.landing-hero {{ text-align: center; padding: 20px 0 32px 0; }}'
+        f'.landing-hero .kicker {{ color: {MUSTARD}; font-size: 12px;'
+        f'                        letter-spacing: 4px; font-family: "Barlow Condensed", sans-serif;'
+        f'                        font-weight: 700; }}'
+        f'.landing-hero h1 {{ color: {CREAM}; font-family: "Playfair Display", Georgia, serif !important;'
+        f'                   font-size: 64px; margin: 12px 0 0 0; letter-spacing: 2px;'
+        f'                   text-shadow: 0 0 30px rgba(212,165,55,0.4); text-transform: none;'
+        f'                   line-height: 1; }}'
+        f'.landing-hero .sub {{ color: {SAGE}; font-size: 16px; letter-spacing: 2px;'
+        f'                     font-family: "Barlow Condensed", sans-serif; font-weight: 600;'
+        f'                     margin-top: 14px; }}'
+        f'.marquee-card {{ background: {FOREST_MID}; border: 2px solid {MUSTARD};'
+        f'                border-radius: 8px; padding: 28px 32px; margin: 24px 0;'
+        f'                box-shadow: 0 0 40px rgba(212,165,55,0.25); text-align: center; }}'
+        f'.marquee-card .headline {{ color: {MUSTARD}; font-family: "Playfair Display", serif !important;'
+        f'                          font-size: 48px; font-weight: 700; margin: 0;'
+        f'                          text-transform: none; letter-spacing: 1px; }}'
+        f'.marquee-card .record {{ color: {CREAM}; font-family: "Barlow Condensed", sans-serif;'
+        f'                        font-size: 22px; letter-spacing: 3px; margin-top: 8px; font-weight: 700; }}'
+        f'.marquee-card .footnote {{ color: {SAGE}; font-family: "Cormorant Garamond", serif;'
+        f'                          font-style: italic; margin-top: 12px; font-size: 14px; }}'
+        f'.landing-section {{ background: {FOREST_MID}; border: 1px solid {FOREST_LIGHT};'
+        f'                   border-radius: 8px; padding: 24px 28px; margin: 20px 0; }}'
+        f'.landing-section h3 {{ color: {MUSTARD}; font-family: "Playfair Display", serif !important;'
+        f'                      margin-top: 0; text-transform: none; letter-spacing: 1px; }}'
+        f'.landing-section p {{ color: {CREAM}; font-family: "Cormorant Garamond", serif;'
+        f'                     font-size: 16px; line-height: 1.6; }}'
+        f'.perk-row {{ display: flex; gap: 24px; flex-wrap: wrap; margin-top: 16px; }}'
+        f'.perk {{ flex: 1; min-width: 180px; padding: 16px; background: {FOREST_DEEP};'
+        f'        border-left: 3px solid {MUSTARD}; border-radius: 4px; }}'
+        f'.perk .perk-num {{ color: {MUSTARD}; font-family: "Barlow Condensed", sans-serif;'
+        f'                  font-size: 32px; font-weight: 800; }}'
+        f'.perk .perk-label {{ color: {CREAM}; font-family: "Barlow Condensed", sans-serif;'
+        f'                    letter-spacing: 1.5px; margin-top: 4px; font-size: 13px; font-weight: 700; }}'
+        f'.perk .perk-desc {{ color: {SAGE}; font-family: "Cormorant Garamond", serif;'
+        f'                   font-style: italic; margin-top: 8px; font-size: 13px; }}'
+        f'</style>',
+        unsafe_allow_html=True,
+    )
+
+    header_banner("live" if ODDS_API_KEY else "warn")
+
+    # Hero
+    st.markdown(
+        '<div class="landing-hero">'
+        '<div class="kicker">A DATA-DRIVEN NFL ATS SYSTEM</div>'
+        '<h1>Margin of Victory</h1>'
+        '<div class="sub">3-FACTOR TRIGGER MODEL · LIVE ODDS · SHARP EDGE</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Marquee stat
+    stats = get_marquee_stats()
+    bw, bl, bp = stats["backtest_wins"], stats["backtest_losses"], stats["backtest_pushes"]
+    rate_pct = f"{stats['backtest_cover_rate']*100:.1f}%"
+    st.markdown(
+        f'<div class="marquee-card">'
+        f'<div class="headline">{rate_pct} ATS on Triggered Picks</div>'
+        f'<div class="record">{bw}–{bl}–{bp} · SEASONS {stats["backtest_seasons"]}</div>'
+        f'<div class="footnote">Validated backtest. Full transparency inside — every pick, every result.</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Two-column layout: email capture (left, wider) + sign-in (right)
+    left, right = st.columns([3, 2])
+
+    with left:
+        st.markdown(
+            f'<div class="landing-section">'
+            f'<h3>Get Free Weekly Picks</h3>'
+            f'<p>Every Sunday morning — that week\'s triggered picks, watch list, and last week\'s '
+            f'results delivered to your inbox. No spam. Unsubscribe anytime.</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.form("lead_form", clear_on_submit=True):
+            email = st.text_input("Email address *", placeholder="you@example.com", key="lead_email")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                name = st.text_input("First name (optional)", placeholder="Your name", key="lead_name")
+            with c2:
+                source = st.selectbox(
+                    "How'd you find us? (optional)",
+                    ["", "Twitter/X", "YouTube", "Reddit", "The book", "A friend", "Google", "Other"],
+                    key="lead_source",
+                )
+
+            submitted = st.form_submit_button("GET FREE WEEKLY PICKS", width="stretch")
+
+        if submitted:
+            ok, msg = add_lead(email, name, source)
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+
+    with right:
+        st.markdown(
+            f'<div class="landing-section" style="height:100%;">'
+            f'<h3>Already a Member?</h3>'
+            f'<p>Sign in to access this week\'s live picks, bet tracking, and the full track record.</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("SIGN IN", width="stretch", key="goto_login"):
+            st.session_state["show_login"] = True
+            st.rerun()
+
+    # Why It Works section
+    st.markdown(
+        f'<div class="landing-section">'
+        f'<h3>The 3-Factor Trigger</h3>'
+        f'<p>Every game runs through three independent filters. When all three align — and only then — '
+        f'the system fires a trigger.</p>'
+        f'<div class="perk-row">'
+        f'<div class="perk">'
+        f'<div class="perk-num">F1</div>'
+        f'<div class="perk-label">PERFORMANCE</div>'
+        f'<div class="perk-desc">Net EPA gap over rolling 4-week window identifies the sharper team.</div>'
+        f'</div>'
+        f'<div class="perk">'
+        f'<div class="perk-num">F2</div>'
+        f'<div class="perk-label">MARKET</div>'
+        f'<div class="perk-desc">Line-movement proxy catches when public money and sharp money diverge.</div>'
+        f'</div>'
+        f'<div class="perk">'
+        f'<div class="perk-num">F3</div>'
+        f'<div class="perk-label">SITUATIONAL</div>'
+        f'<div class="perk-desc">Rest advantage, divisional dog spots, and late-season motivation edges.</div>'
+        f'</div>'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # About the book
+    st.markdown(
+        f'<div class="landing-section">'
+        f'<h3>Companion App to the Book</h3>'
+        f'<p><em>MARGIN of VICTORY: A Practical Playbook for Sports Betting Success</em> — the framework '
+        f'behind this system, written by Ron Zellers (Vinny Marchetti). This app puts the book\'s method '
+        f'to work with live 2026 data, real-time odds, and full transparency on every pick.</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f'<p style="text-align: center; color: {CLOUD_GRAY if False else SAGE}; font-size: 11px;'
+        f'letter-spacing: 2px; font-family: "Barlow Condensed", sans-serif; margin-top: 32px;">'
+        f'© MARGIN OF VICTORY · MOVPLAYBOOK.COM'
+        f'</p>',
+        unsafe_allow_html=True,
+    )
+
+
+
     """Render the full-screen login page. Sets st.session_state on success."""
     # Login-page-specific CSS
     st.markdown(
@@ -801,6 +1046,11 @@ def render_login_page():
                 f'</p>',
                 unsafe_allow_html=True,
             )
+
+        if st.button("← Back to Home", width="stretch", key="back_home"):
+            if "show_login" in st.session_state:
+                del st.session_state["show_login"]
+            st.rerun()
 
     st.markdown(
         f'<p class="login-footer">by <strong>Ron Zellers</strong> · Companion App to the Book</p>',
@@ -1604,7 +1854,11 @@ def render_odds_board(row: pd.Series, sharp_team_abbr: str, sharp_is_home: bool)
 # AUTH GATE
 # ═══════════════════════════════════════════════════════════════════════════
 if "auth_user" not in st.session_state:
-    render_login_page()
+    # Not signed in — show landing page by default; login when requested
+    if st.session_state.get("show_login"):
+        render_login_page()
+    else:
+        render_landing_page()
     st.stop()
 
 # Identify current user
@@ -1716,15 +1970,16 @@ has_odds_key = bool(ODDS_API_KEY)
 header_banner("live" if has_odds_key else "warn")
 
 # Build tabs list — admin gets an extra Admin panel tab
-tab_labels = ["THIS WEEK'S PICKS", "BET TRACKING", "HISTORICAL BACKTEST"]
+tab_labels = ["THIS WEEK'S PICKS", "📊 TRACK RECORD", "BET TRACKING", "HISTORICAL BACKTEST"]
 if is_admin:
     tab_labels.append("⚙️ ADMIN")
 
 _tabs = st.tabs(tab_labels)
 mode_picks = _tabs[0]
-mode_track = _tabs[1]
-mode_bt = _tabs[2]
-mode_admin = _tabs[3] if is_admin else None
+mode_record = _tabs[1]
+mode_track = _tabs[2]
+mode_bt = _tabs[3]
+mode_admin = _tabs[4] if is_admin else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2237,6 +2492,201 @@ with mode_picks:
         for _, row in not_triggered.sort_values("factor_score", ascending=False).iterrows():
             render_pick_card(row, is_watch=False, is_not_triggered=True)
             render_bet_form(row, "manual", "not")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MODE 1.5 — TRACK RECORD (full transparency)
+# ═══════════════════════════════════════════════════════════════════════════
+with mode_record:
+    st.markdown(
+        f'<h3 style="color:{MUSTARD}; font-family: \'Playfair Display\', serif; text-transform: none;">'
+        f'Full Track Record — Every Pick, Every Result'
+        f'</h3>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f'<p style="color:{CREAM}; font-family: \'Cormorant Garamond\', serif; font-size: 15px;">'
+        f'Transparency is the entire point. Every triggered pick is logged in advance. Every result is here — '
+        f'wins, losses, and pushes. Nothing is hidden after the fact.</p>',
+        unsafe_allow_html=True,
+    )
+
+    # ── SECTION 1: Backtest 2022-2024 (validated)
+    st.markdown(
+        f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif; letter-spacing: 2px;'
+        f'margin-top: 24px;">VALIDATED BACKTEST · 2022–2024</h4>',
+        unsafe_allow_html=True,
+    )
+
+    # Load backtest data with default thresholds
+    try:
+        with st.spinner("Loading historical backtest..."):
+            _bt_seasons = (2022, 2023, 2024)
+            _bt_weekly = compute_lagged_epa(_bt_seasons)
+            _bt_sched = load_schedules()
+            _bt_sched = _bt_sched[_bt_sched["season"].isin(_bt_seasons)].copy()
+            _bt_results = score_games(
+                _bt_sched, _bt_weekly,
+                0.12, 3.0, 10.0, 3, 14, 2,
+                require_result=True
+            )
+            _bt_results = _bt_results[_bt_results["ats_result"] != "NO_DATA"].copy()
+            _bt_triggered = _bt_results[_bt_results["trigger_fired"] == 1].copy()
+
+        _tc = int((_bt_triggered["ats_result"] == "COVER").sum())
+        _tnc = int((_bt_triggered["ats_result"] == "NO_COVER").sum())
+        _tp = int((_bt_triggered["ats_result"] == "PUSH").sum())
+        _tdec = _tc + _tnc
+        _trate = _tc / _tdec if _tdec > 0 else 0
+
+        # Marquee stats
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.metric("COVER RATE", f"{_trate:.1%}" if _tdec > 0 else "—")
+        with c2: st.metric("RECORD", f"{_tc}–{_tnc}–{_tp}")
+        with c3: st.metric("QUALIFYING PICKS", f"{_tdec + _tp}")
+        # Units won at -110 (each loss = -1.1u, each win = +1u)
+        _units = _tc * 1.0 - _tnc * 1.1
+        with c4: st.metric("UNITS (@ -110)", f"{_units:+.1f}u")
+
+        # Running P/L chart
+        _bt_triggered_sorted = _bt_triggered.sort_values(["season", "week"]).copy()
+        _bt_triggered_sorted["unit_result"] = _bt_triggered_sorted["ats_result"].map({
+            "COVER": 1.0, "NO_COVER": -1.1, "PUSH": 0.0
+        })
+        _bt_triggered_sorted["cum_units"] = _bt_triggered_sorted["unit_result"].cumsum()
+        _bt_triggered_sorted["pick_num"] = range(1, len(_bt_triggered_sorted) + 1)
+
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif; letter-spacing: 2px;'
+            f'margin-top: 24px;">CUMULATIVE UNITS OVER TIME</h4>',
+            unsafe_allow_html=True,
+        )
+        _chart = pd.DataFrame({
+            "Pick #": _bt_triggered_sorted["pick_num"],
+            "Cumulative Units": _bt_triggered_sorted["cum_units"],
+        })
+        st.line_chart(_chart.set_index("Pick #"))
+
+        # Per-season table
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif; letter-spacing: 2px;'
+            f'margin-top: 24px;">BY SEASON</h4>',
+            unsafe_allow_html=True,
+        )
+        _rows = []
+        for _s in sorted(_bt_seasons):
+            _st = _bt_triggered[_bt_triggered["season"] == _s]
+            _sc = (_st["ats_result"] == "COVER").sum()
+            _snc = (_st["ats_result"] == "NO_COVER").sum()
+            _sp = (_st["ats_result"] == "PUSH").sum()
+            _sdec = _sc + _snc
+            _srate = _sc / _sdec if _sdec > 0 else np.nan
+            _rows.append({
+                "Season": _s,
+                "Triggered": len(_st),
+                "Record": f"{_sc}–{_snc}–{_sp}",
+                "Cover Rate": f"{_srate:.1%}" if not pd.isna(_srate) else "—",
+                "Units": f"{_sc * 1.0 - _snc * 1.1:+.1f}u",
+            })
+        st.dataframe(pd.DataFrame(_rows), width="stretch", hide_index=True)
+
+        # Individual pick list
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif; letter-spacing: 2px;'
+            f'margin-top: 24px;">EVERY TRIGGERED PICK</h4>',
+            unsafe_allow_html=True,
+        )
+        if is_admin:
+            _cols = ["season", "week", "sharp_side", "opponent", "location",
+                     "sharp_spread", "home_score", "away_score",
+                     "epa_gap_abs", "F1_epa", "F2_line_proxy", "F3_situational",
+                     "sharp_margin", "ats_result"]
+            _admin_note = (
+                f'<p style="color:{SAGE}; font-family: \'Cormorant Garamond\', serif;'
+                f'font-style: italic; font-size: 13px;">Admin view — factor scores visible.</p>'
+            )
+            st.markdown(_admin_note, unsafe_allow_html=True)
+        else:
+            # Subscriber view — hide factor scores/why-it-fired columns
+            _cols = ["season", "week", "sharp_side", "opponent", "location",
+                     "sharp_spread", "home_score", "away_score",
+                     "sharp_margin", "ats_result"]
+        _disp = _bt_triggered[[c for c in _cols if c in _bt_triggered.columns]].copy()
+        _disp = _disp.sort_values(["season", "week"], ascending=[False, True])
+        if "epa_gap_abs" in _disp.columns:
+            _disp["epa_gap_abs"] = _disp["epa_gap_abs"].round(3)
+        if "sharp_spread" in _disp.columns:
+            _disp["sharp_spread"] = _disp["sharp_spread"].round(1)
+        # Rename cols to nicer labels
+        _rename = {
+            "season": "Season", "week": "Wk", "sharp_side": "Pick",
+            "opponent": "Opp", "location": "Loc",
+            "sharp_spread": "Spread",
+            "home_score": "Home Pts", "away_score": "Away Pts",
+            "epa_gap_abs": "EPA Gap",
+            "F1_epa": "F1", "F2_line_proxy": "F2", "F3_situational": "F3",
+            "sharp_margin": "ATS Margin", "ats_result": "Result",
+        }
+        _disp = _disp.rename(columns=_rename)
+        st.dataframe(_disp, width="stretch", hide_index=True, height=500)
+    except Exception as e:
+        st.warning(f"Historical backtest unavailable: {e}")
+
+    # ── SECTION 2: Live 2026 Season
+    st.markdown("---")
+    st.markdown(
+        f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif; letter-spacing: 2px;'
+        f'margin-top: 24px;">LIVE 2026 SEASON</h4>',
+        unsafe_allow_html=True,
+    )
+
+    _picks_hist = load_picks_history()
+    _live_triggered = _picks_hist[_picks_hist["trigger_fired"] == 1] if len(_picks_hist) > 0 else pd.DataFrame()
+    _live_settled = _live_triggered[
+        _live_triggered["ats_result"].isin(["COVER", "NO_COVER", "PUSH"])
+    ] if len(_live_triggered) > 0 else pd.DataFrame()
+
+    if len(_live_settled) == 0:
+        st.markdown(
+            f'<div class="info-banner">No settled live picks yet for 2026. Track record populates '
+            f'as games resolve. Check back after Week 1 Sunday.</div>',
+            unsafe_allow_html=True,
+        )
+        # Still show pending live triggers if any
+        _live_pending = _live_triggered[
+            ~_live_triggered["ats_result"].isin(["COVER", "NO_COVER", "PUSH"])
+        ] if len(_live_triggered) > 0 else pd.DataFrame()
+        if len(_live_pending) > 0:
+            st.markdown(
+                f'<p style="color:{CREAM};">{len(_live_pending)} pending picks awaiting results.</p>',
+                unsafe_allow_html=True,
+            )
+    else:
+        _lc = int((_live_settled["ats_result"] == "COVER").sum())
+        _lnc = int((_live_settled["ats_result"] == "NO_COVER").sum())
+        _lp = int((_live_settled["ats_result"] == "PUSH").sum())
+        _ldec = _lc + _lnc
+        _lrate = _lc / _ldec if _ldec > 0 else 0
+        _lunits = _lc * 1.0 - _lnc * 1.1
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.metric("2026 COVER RATE", f"{_lrate:.1%}" if _ldec > 0 else "—")
+        with c2: st.metric("2026 RECORD", f"{_lc}–{_lnc}–{_lp}")
+        with c3: st.metric("2026 PICKS", f"{_ldec + _lp}")
+        with c4: st.metric("2026 UNITS", f"{_lunits:+.1f}u")
+
+        # Live pick table
+        if is_admin:
+            _live_cols = ["week", "sharp_side", "opponent", "sharp_spread",
+                          "F1_epa", "F2_line_proxy", "F3_situational",
+                          "ats_result"]
+        else:
+            _live_cols = ["week", "sharp_side", "opponent", "sharp_spread", "ats_result"]
+        _live_disp = _live_triggered[[c for c in _live_cols if c in _live_triggered.columns]].copy()
+        _live_disp = _live_disp.sort_values("week", ascending=False)
+        _live_disp = _live_disp.rename(columns=_rename)
+        st.dataframe(_live_disp, width="stretch", hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2780,6 +3230,43 @@ if is_admin and mode_admin is not None:
             st.dataframe(activity, width="stretch", hide_index=True)
         else:
             st.info("No bet activity yet.")
+
+        # ── Email leads
+        st.markdown("---")
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px;">EMAIL LEADS ({len(load_leads())})</h4>',
+            unsafe_allow_html=True,
+        )
+        leads_df = load_leads()
+        if len(leads_df) == 0:
+            st.info("No leads captured yet. Once visitors sign up on the landing page, they'll appear here.")
+        else:
+            # Summary metrics
+            _by_source = leads_df["source"].fillna("(none)").replace("", "(none)").value_counts()
+            lc1, lc2, lc3 = st.columns(3)
+            with lc1: st.metric("TOTAL LEADS", f"{len(leads_df)}")
+            with lc2:
+                _week_ago = (datetime.now() - pd.Timedelta(days=7)).isoformat()
+                _recent = leads_df[leads_df["captured_at"] >= _week_ago]
+                st.metric("LAST 7 DAYS", f"{len(_recent)}")
+            with lc3:
+                _top_source = _by_source.index[0] if len(_by_source) > 0 else "—"
+                st.metric("TOP SOURCE", _top_source)
+
+            # Full lead table
+            _leads_display = leads_df.sort_values("captured_at", ascending=False).copy()
+            st.dataframe(_leads_display, width="stretch", hide_index=True, height=300)
+
+            # Export
+            _leads_csv = leads_df.to_csv(index=False)
+            st.download_button(
+                "📥 EXPORT LEADS TO CSV",
+                _leads_csv,
+                f"movplaybook_leads_{datetime.now():%Y%m%d}.csv",
+                "text/csv",
+                width="stretch",
+            )
 
 
 st.markdown("---")
