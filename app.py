@@ -813,6 +813,9 @@ def get_marquee_stats() -> dict:
     return marquee
 
 
+AMAZON_BOOK_URL = "https://www.amazon.com/Margin-Victory-Practical-Playbook-Football/dp/B0FC7J7KPV/ref=tmm_pap_swatch_0"
+
+
 def render_landing_page():
     """Public marketing landing page — email capture, teaser stats, sign-in link."""
     st.markdown(
@@ -853,6 +856,11 @@ def render_landing_page():
         f'                    letter-spacing: 1.5px; margin-top: 4px; font-size: 13px; font-weight: 700; }}'
         f'.perk .perk-desc {{ color: {SAGE}; font-family: "Cormorant Garamond", serif;'
         f'                   font-style: italic; margin-top: 8px; font-size: 13px; }}'
+        f'.book-link {{ display: inline-block; margin-top: 12px; color: {MUSTARD};'
+        f'             text-decoration: none; font-family: "Barlow Condensed", sans-serif;'
+        f'             font-weight: 700; letter-spacing: 1.5px; border-bottom: 2px solid {MUSTARD};'
+        f'             padding-bottom: 2px; }}'
+        f'.book-link:hover {{ color: {CREAM}; border-bottom-color: {CREAM}; }}'
         f'</style>',
         unsafe_allow_html=True,
     )
@@ -929,7 +937,7 @@ def render_landing_page():
             st.session_state["show_login"] = True
             st.rerun()
 
-    # Why It Works section
+    # Why It Works
     st.markdown(
         f'<div class="landing-section">'
         f'<h3>The 3-Factor Trigger</h3>'
@@ -956,67 +964,48 @@ def render_landing_page():
         unsafe_allow_html=True,
     )
 
-    # About the book
+    # About the book + Amazon link
     st.markdown(
         f'<div class="landing-section">'
         f'<h3>Companion App to the Book</h3>'
         f'<p><em>MARGIN of VICTORY: A Practical Playbook for Sports Betting Success</em> — the framework '
         f'behind this system, written by Ron Zellers (Vinny Marchetti). This app puts the book\'s method '
         f'to work with live 2026 data, real-time odds, and full transparency on every pick.</p>'
+        f'<a href="{AMAZON_BOOK_URL}" target="_blank" class="book-link">BUY THE BOOK ON AMAZON →</a>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
     st.markdown(
-        f'<p style="text-align: center; color: {CLOUD_GRAY if False else SAGE}; font-size: 11px;'
-        f'letter-spacing: 2px; font-family: "Barlow Condensed", sans-serif; margin-top: 32px;">'
-        f'© MARGIN OF VICTORY · MOVPLAYBOOK.COM'
+        f'<p style="text-align: center; color: {SAGE}; font-size: 11px;'
+        f'letter-spacing: 2px; font-family: \'Barlow Condensed\', sans-serif; margin-top: 32px;">'
+        f'© MARGIN OF VICTORY · MOVPLAYBOOK.COM · '
+        f'<a href="{AMAZON_BOOK_URL}" target="_blank" style="color:{MUSTARD}; text-decoration: none;">GET THE BOOK</a>'
         f'</p>',
         unsafe_allow_html=True,
     )
 
 
-
-    """Render the full-screen login page. Sets st.session_state on success."""
-    # Login-page-specific CSS
+def render_login_page():
+    """Render the sign-in page. Sets st.session_state on success."""
     st.markdown(
         f'<style>'
-        f'.login-container {{ max-width: 480px; margin: 40px auto; }}'
-        f'.login-brand {{ text-align: center; margin-bottom: 32px; }}'
-        f'.login-brand .tag {{ color: {MUSTARD}; font-size: 12px; letter-spacing: 4px;'
-        f'                     font-family: "Barlow Condensed", sans-serif; font-weight: 700; }}'
-        f'.login-brand h1 {{ color: {CREAM}; font-family: "Playfair Display", Georgia, serif !important;'
-        f'                   font-size: 56px; margin: 8px 0 0 0; letter-spacing: 2px;'
-        f'                   text-shadow: 0 0 30px rgba(212,165,55,0.4); text-transform: none; }}'
-        f'.login-brand .sub {{ color: {SAGE}; font-size: 12px; letter-spacing: 3px;'
-        f'                     font-family: "Barlow Condensed", sans-serif; font-weight: 700;'
-        f'                     margin-top: 8px; }}'
         f'.login-card {{ background: {FOREST_MID}; border: 2px solid {MUSTARD};'
-        f'               border-radius: 8px; padding: 32px 36px;'
+        f'               border-radius: 8px; padding: 32px 36px; margin-top: 20px;'
         f'               box-shadow: 0 0 40px rgba(212,165,55,0.25); }}'
         f'.login-card h2 {{ color: {CREAM}; font-family: "Barlow Condensed", sans-serif;'
         f'                  font-size: 18px; letter-spacing: 3px; text-align: center;'
         f'                  margin: 0 0 20px 0; }}'
-        f'.login-footer {{ text-align: center; margin-top: 20px; color: {CREAM_MUTED};'
+        f'.login-footer {{ text-align: center; margin-top: 24px; color: {CREAM};'
         f'                 font-family: "Cormorant Garamond", serif; font-style: italic;'
         f'                 font-size: 14px; }}'
-        f'.login-footer strong {{ color: {MUSTARD}; }}'
+        f'.login-footer a {{ color: {MUSTARD}; text-decoration: none; font-weight: 700; }}'
         f'</style>',
         unsafe_allow_html=True,
     )
 
     header_banner("live" if ODDS_API_KEY else "warn")
 
-    st.markdown(
-        '<div class="login-brand">'
-        '<div class="tag">COMPLIMENTARY ACCESS</div>'
-        '<h1>Margin of Victory</h1>'
-        '<div class="sub">3-FACTOR NFL ATS SYSTEM</div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    # Use columns to center the login card
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
         st.markdown('<div class="login-card">', unsafe_allow_html=True)
@@ -1032,31 +1021,27 @@ def render_landing_page():
             if result:
                 st.session_state["auth_user"] = result["username"]
                 st.session_state["auth_role"] = result["role"]
+                # Clear the show_login flag so we don't bounce back
+                if "show_login" in st.session_state:
+                    del st.session_state["show_login"]
                 st.rerun()
             else:
                 st.error("Invalid username or password.")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-        with st.expander("Don't have an account? Request Access"):
-            st.markdown(
-                f'<p style="color:{CREAM}; font-family: \'Cormorant Garamond\', serif;">'
-                f'Contact <strong style="color:{MUSTARD};">Ron Zellers</strong> directly to request access. '
-                f'Access is granted on a case-by-case basis.'
-                f'</p>',
-                unsafe_allow_html=True,
-            )
-
         if st.button("← Back to Home", width="stretch", key="back_home"):
             if "show_login" in st.session_state:
                 del st.session_state["show_login"]
             st.rerun()
 
-    st.markdown(
-        f'<p class="login-footer">by <strong>Ron Zellers</strong> · Companion App to the Book</p>',
-        unsafe_allow_html=True,
-    )
-
+        st.markdown(
+            f'<p class="login-footer">'
+            f'Don\'t have an account? Contact <strong style="color:{MUSTARD};">Ron Zellers</strong> for access.<br>'
+            f'<a href="{AMAZON_BOOK_URL}" target="_blank">Buy the book on Amazon →</a>'
+            f'</p>',
+            unsafe_allow_html=True,
+        )
 
 
 PREFERRED_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars"]
@@ -2166,9 +2151,17 @@ with mode_picks:
                 scored.at[idx, "qb_disqualified"] = 1
                 scored.at[idx, "trigger_fired"] = 0  # remove from triggers
 
-    # Auto-log this week's snapshot for track-record persistence (idempotent)
-    if len(scored) > 0 and is_current_week:
-        log_picks_snapshot(scored, selected_season, selected_week)
+    # Auto-log this week's snapshot for track-record persistence.
+    # Guard with session state so we only write ONCE per session per week —
+    # otherwise repeated writes on every rerun can trigger Streamlit's
+    # file watcher and cause an infinite reload loop.
+    _snap_key = f"snapshot_logged_{selected_season}_{selected_week}"
+    if len(scored) > 0 and is_current_week and not st.session_state.get(_snap_key):
+        try:
+            log_picks_snapshot(scored, selected_season, selected_week)
+        except Exception:
+            pass
+        st.session_state[_snap_key] = True
 
     # If no games could be scored (e.g. no prior EPA data yet), show a fallback
     # view of the raw slate so the user still sees matchups + lines + weather.
@@ -3273,6 +3266,10 @@ st.markdown("---")
 st.markdown(f"""
 <p style="text-align: center; color: {SAGE}; font-size: 11px;
           letter-spacing: 2px; font-family: 'Barlow Condensed', sans-serif;">
-    MARGIN OF VICTORY · BY RON ZELLERS · LIVE: THE ODDS API · HISTORICAL: NFLVERSE · {datetime.now():%Y-%m-%d %H:%M}
+    MARGIN OF VICTORY · BY RON ZELLERS · LIVE: THE ODDS API · HISTORICAL: NFLVERSE ·
+    <a href="{AMAZON_BOOK_URL}" target="_blank" style="color:{MUSTARD}; text-decoration:none; font-weight:700;">
+        GET THE BOOK ON AMAZON →
+    </a>
+    · {datetime.now():%Y-%m-%d %H:%M}
 </p>
 """, unsafe_allow_html=True)
