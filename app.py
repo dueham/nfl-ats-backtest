@@ -1625,7 +1625,7 @@ def load_schedules() -> pd.DataFrame:
     return pd.read_csv(BytesIO(r.content), low_memory=False)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False)
 def compute_lagged_epa(seasons_tuple: tuple) -> pd.DataFrame:
     frames = [load_play_by_play(s) for s in seasons_tuple]
     pbp = pd.concat(frames, ignore_index=True)
@@ -1650,52 +1650,30 @@ def compute_lagged_epa(seasons_tuple: tuple) -> pd.DataFrame:
     return weekly
 
 
-def _team_snapshot_before_week(weekly: pd.DataFrame, season: int, before_week: int,
-                               window: int = 4, min_periods: int = 2) -> pd.DataFrame:
-    """
-    One row per team: rolling net EPA over that team's last `window` games
-    played BEFORE `before_week` of `season` (no look-ahead), plus how many
-    such games exist. Works for upcoming (unplayed) weeks and bye weeks,
-    which have no play-by-play row of their own.
-    """
-    hist = weekly[(weekly["season"] == season) & (weekly["week"] < before_week)]
-    hist = hist[hist["net_epa"].notna()].sort_values(["team", "week"])
-    if len(hist) == 0:
-        return pd.DataFrame(columns=["season", "week", "team", "off_epa", "def_epa",
-                                     "net_epa", "rolling_net_epa", "prior_games_played"])
-    last_n = hist.groupby("team").tail(window)
-    snap = (
-        last_n.groupby("team")
-        .agg(off_epa=("off_epa", "mean"), def_epa=("def_epa", "mean"),
-             rolling_net_epa=("net_epa", "mean"))
-        .reset_index()
-    )
-    games_played = hist.groupby("team").size().rename("prior_games_played").reset_index()
-    snap = snap.merge(games_played, on="team", how="left")
-    snap.loc[snap["prior_games_played"] < min_periods, "rolling_net_epa"] = np.nan
-    snap["net_epa"] = snap["rolling_net_epa"]
-    return snap
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False)
 def compute_smart_epa_for_week(target_season: int, target_week: int,
                                 min_games: int) -> pd.DataFrame:
     """
-    Return ONE row per team with the EPA snapshot to score the target week.
+    Return a per-team EPA snapshot appropriate for scoring the target week.
 
-    Built from each team's games played BEFORE target_week (last 4, lagged),
-    not from a play-by-play row for target_week itself — that row doesn't
-    exist until the game is played, which left every upcoming game unscored.
+    Logic:
+      - Week 1-2 with min_games >= 2: blend previous season's late-season EPA
+        (weeks 15-18 rolling) as a stand-in for teams that don't yet have
+        the required current-season games.
+      - Week 3+: use current-season lagged EPA only.
 
-    Weeks 1-2 with min_games >= 2: teams without enough current-season games
-    use the previous season's weeks 15+ average instead.
-    Week 3+: current season only.
+    Returns rows shaped like compute_lagged_epa output but tagged with the
+    correct target (season, week) so downstream merge finds them.
     """
+    # Always compute current-season EPA
     current_epa = compute_lagged_epa((target_season,))
-    current_snapshot = _team_snapshot_before_week(current_epa, target_season, target_week)
-    current_snapshot["season"] = target_season
-    current_snapshot["week"] = target_week
+    # Slice to the target week
+    current_snapshot = current_epa[
+        (current_epa["season"] == target_season)
+        & (current_epa["week"] == target_week)
+    ].copy()
 
+    # If Week 3+, or user requires min 1 game, return current-season only
     if target_week >= 3 or min_games < 2:
         return current_snapshot
 
@@ -1705,6 +1683,7 @@ def compute_smart_epa_for_week(target_season: int, target_week: int,
     except Exception:
         return current_snapshot
 
+    # Take each team's average EPA over their last 4 games of prior season
     prior_late = prior_epa[
         (prior_epa["season"] == target_season - 1)
         & (prior_epa["week"] >= 15)
@@ -1718,20 +1697,16 @@ def compute_smart_epa_for_week(target_season: int, target_week: int,
         .reset_index()
         .rename(columns={"net_epa": "rolling_net_epa"})
     )
-    prior_snap["net_epa"] = prior_snap["rolling_net_epa"]
     prior_snap["season"] = target_season
     prior_snap["week"] = target_week
     prior_snap["prior_games_played"] = 4  # treated as 4 games so it passes min_games=2..4
 
-    # Keep a team's current-season snapshot only if it already meets min_games
-    # with a valid rolling value; otherwise use its prior-season stand-in.
-    good_current = current_snapshot[
-        current_snapshot["rolling_net_epa"].notna()
-        & (current_snapshot["prior_games_played"] >= min_games)
-    ]
-    prior_only = prior_snap[~prior_snap["team"].isin(set(good_current["team"]))]
+    # If a team is in both current and prior snapshots, prefer current (has this-year games)
+    have_current = set(current_snapshot["team"].tolist())
+    prior_only = prior_snap[~prior_snap["team"].isin(have_current)]
 
-    return pd.concat([good_current, prior_only], ignore_index=True)
+    combined = pd.concat([current_snapshot, prior_only], ignore_index=True)
+    return combined
 
 
 def get_current_nfl_context(schedules_df: pd.DataFrame) -> tuple:
@@ -2120,18 +2095,21 @@ with mode_picks:
             )
             # If empty, fall back to standard prior-season compute
             if len(weekly_epa) == 0:
-                weekly_epa = _team_snapshot_before_week(
-                    compute_lagged_epa((selected_season - 1,)), selected_season - 1, 99
-                )
+                weekly_epa = compute_lagged_epa((selected_season - 1,))
+                # Force season/week to match target so merge works
+                weekly_epa = weekly_epa[
+                    weekly_epa["season"] == selected_season - 1
+                ].copy()
                 weekly_epa["season"] = selected_season
                 weekly_epa["week"] = selected_week
                 st.info(f"Using {selected_season - 1} EPA data as fallback (no {selected_season} data yet).")
         except Exception as e:
             if selected_season > 2020:
                 try:
-                    weekly_epa = _team_snapshot_before_week(
-                        compute_lagged_epa((selected_season - 1,)), selected_season - 1, 99
-                    )
+                    weekly_epa = compute_lagged_epa((selected_season - 1,))
+                    weekly_epa = weekly_epa[
+                        weekly_epa["season"] == selected_season - 1
+                    ].copy()
                     weekly_epa["season"] = selected_season
                     weekly_epa["week"] = selected_week
                     st.warning(f"Using {selected_season - 1} EPA data as fallback: {e}")
