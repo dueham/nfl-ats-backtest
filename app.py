@@ -1240,6 +1240,13 @@ def settle_picks_history(season: int) -> pd.DataFrame:
     if len(picks) == 0:
         return picks
 
+    # Force ats_result to object dtype so we can write string results into it.
+    # The column was created with NaN values which pandas inferred as float64,
+    # and writing "COVER"/"NO_COVER"/"PUSH" into a float column raises
+    # "Invalid value 'NO_COVER' for dtype 'float64'".
+    picks["ats_result"] = picks["ats_result"].astype(object)
+    picks["cover_margin"] = pd.to_numeric(picks["cover_margin"], errors="coerce")
+
     # Only touch rows for the given season
     season_mask = picks["season"] == season
     unsettled_mask = season_mask & ~picks["ats_result"].isin(["COVER", "NO_COVER", "PUSH"])
