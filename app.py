@@ -1216,10 +1216,105 @@ def log_picks_snapshot(scored_df: pd.DataFrame, season: int, week: int):
         })
     new_df = pd.DataFrame(rows)
     combined = pd.concat([existing, new_df], ignore_index=True)
+    # Dedupe on game identity to prevent old duplicates from piling up
+    if {"season", "week", "home_team", "away_team"}.issubset(combined.columns):
+        combined = combined.drop_duplicates(
+            subset=["season", "week", "home_team", "away_team"], keep="last"
+        ).reset_index(drop=True)
     try:
         combined.to_csv(PICKS_FILE, index=False)
     except Exception:
         pass  # non-fatal — don't break the app if writing fails
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def settle_picks_history(season: int) -> pd.DataFrame:
+    """
+    Auto-settle unresolved picks in picks_history.csv by joining against
+    nflverse final scores for the given season. Fills in ats_result and
+    cover_margin for any pick whose game is final. Returns the full
+    picks_history dataframe with the latest settlement applied, and
+    persists it back to disk so future reads already have it.
+    """
+    picks = load_picks_history()
+    if len(picks) == 0:
+        return picks
+
+    # Only touch rows for the given season
+    season_mask = picks["season"] == season
+    unsettled_mask = season_mask & ~picks["ats_result"].isin(["COVER", "NO_COVER", "PUSH"])
+    unsettled = picks[unsettled_mask].copy()
+    if len(unsettled) == 0:
+        return picks
+
+    # Pull nflverse schedule — has home_score, away_score for completed games
+    try:
+        sched = load_schedules()
+    except Exception:
+        return picks
+
+    sched = sched[sched["season"] == season].copy()
+    # Keep only completed games (both scores non-null)
+    sched = sched[sched["home_score"].notna() & sched["away_score"].notna()].copy()
+    if len(sched) == 0:
+        return picks  # no completed games yet this season
+
+    sched = sched[["week", "home_team", "away_team", "home_score", "away_score"]].copy()
+
+    # Merge: our pick row has home_team + away_team + week; schedule has final scores
+    merged = unsettled.merge(sched, on=["week", "home_team", "away_team"], how="left")
+    newly_resolved = merged[merged["home_score"].notna()].copy()
+    if len(newly_resolved) == 0:
+        return picks  # none of the unsettled games have finished yet
+
+    # Compute ATS result from sharp side's perspective
+    # sharp_spread is signed from sharp side's POV: negative = sharp lays points, positive = sharp gets points
+    # home_margin = home_score - away_score
+    # sharp_margin = home_margin if sharp is home, else -home_margin
+    # ATS covered when sharp_margin + sharp_spread > 0 (dog) or sharp_margin > |spread| (fav)
+    def compute_ats(row):
+        try:
+            home_s = float(row["home_score"])
+            away_s = float(row["away_score"])
+            sharp_side = row["sharp_side"]
+            home_t = row["home_team"]
+            sharp_is_home = (sharp_side == home_t)
+            sharp_margin = (home_s - away_s) if sharp_is_home else (away_s - home_s)
+            sharp_spread = float(row["sharp_spread"])
+            # sharp_spread is from sharp's POV: fav is negative (lays points), dog is positive (gets points)
+            # ATS diff = sharp_margin - |sharp_spread| if fav, sharp_margin + |sharp_spread| if dog
+            # Simpler: sharp_margin + sharp_spread > 0 → COVER (works for both fav and dog by sign)
+            # Example: Sharp lays -3.5, wins by 7 → margin=7, spread=-3.5, 7+(-3.5)=3.5 > 0 → COVER ✓
+            # Example: Sharp gets +3.5, loses by 2 → margin=-2, spread=+3.5, -2+3.5=1.5 > 0 → COVER ✓
+            ats_diff = sharp_margin + sharp_spread
+            if ats_diff > 0:
+                return "COVER", ats_diff
+            elif ats_diff < 0:
+                return "NO_COVER", ats_diff
+            else:
+                return "PUSH", 0.0
+        except Exception:
+            return np.nan, np.nan
+
+    for idx, row in newly_resolved.iterrows():
+        result, margin = compute_ats(row)
+        # Update the original picks row (match by home/away/week/season)
+        update_mask = (
+            (picks["season"] == row["season"])
+            & (picks["week"] == row["week"])
+            & (picks["home_team"] == row["home_team"])
+            & (picks["away_team"] == row["away_team"])
+        )
+        picks.loc[update_mask, "ats_result"] = result
+        picks.loc[update_mask, "cover_margin"] = margin
+
+    # Persist settled picks back to disk
+    try:
+        picks.to_csv(PICKS_FILE, index=False)
+    except Exception:
+        pass
+
+    return picks
 
 
 def load_bets() -> pd.DataFrame:
@@ -1657,33 +1752,61 @@ def compute_smart_epa_for_week(target_season: int, target_week: int,
     Return a per-team EPA snapshot appropriate for scoring the target week.
 
     Logic:
-      - Week 1-2 with min_games >= 2: blend previous season's late-season EPA
-        (weeks 15-18 rolling) as a stand-in for teams that don't yet have
-        the required current-season games.
-      - Week 3+: use current-season lagged EPA only.
-
-    Returns rows shaped like compute_lagged_epa output but tagged with the
-    correct target (season, week) so downstream merge finds them.
+      - Try current-season PBP first.
+      - If current-season PBP is unavailable (common early in season — nflverse
+        hasn't posted the file yet), fall back entirely to prior season's late
+        EPA (weeks 15-18 avg) tagged with target (season, week).
+      - For weeks 1-2 with min_games >= 2, blend prior season's late EPA for
+        any teams that don't yet have the required current-season games.
     """
-    # Always compute current-season EPA
-    current_epa = compute_lagged_epa((target_season,))
-    # Slice to the target week
-    current_snapshot = current_epa[
-        (current_epa["season"] == target_season)
-        & (current_epa["week"] == target_week)
-    ].copy()
+    # Try current-season EPA — may fail with 404 if nflverse hasn't posted yet
+    current_snapshot = pd.DataFrame()
+    current_available = True
+    try:
+        current_epa = compute_lagged_epa((target_season,))
+        current_snapshot = current_epa[
+            (current_epa["season"] == target_season)
+            & (current_epa["week"] == target_week)
+        ].copy()
+    except Exception:
+        current_available = False
 
-    # If Week 3+, or user requires min 1 game, return current-season only
+    # Full fallback: current-season PBP doesn't exist → use prior season entirely
+    if not current_available or len(current_snapshot) == 0:
+        try:
+            prior_epa = compute_lagged_epa((target_season - 1,))
+            prior_late = prior_epa[
+                (prior_epa["season"] == target_season - 1)
+                & (prior_epa["week"] >= 15)
+            ]
+            if len(prior_late) == 0:
+                # Fall back further: use any week we have
+                prior_late = prior_epa[prior_epa["season"] == target_season - 1]
+            if len(prior_late) == 0:
+                return pd.DataFrame()
+            prior_snap = (
+                prior_late.groupby("team")
+                .agg({"net_epa": "mean", "off_epa": "mean", "def_epa": "mean"})
+                .reset_index()
+                .rename(columns={"net_epa": "rolling_net_epa"})
+            )
+            prior_snap["season"] = target_season
+            prior_snap["week"] = target_week
+            prior_snap["prior_games_played"] = 4
+            return prior_snap
+        except Exception:
+            return pd.DataFrame()
+
+    # Week 3+ or min_games < 2 → current-season only
     if target_week >= 3 or min_games < 2:
         return current_snapshot
 
-    # Weeks 1-2 with min_games >= 2 — pull prior season's late EPA
+    # Weeks 1-2 with min_games >= 2 — blend prior season for missing teams
     try:
         prior_epa = compute_lagged_epa((target_season - 1,))
     except Exception:
         return current_snapshot
 
-    # Take each team's average EPA over their last 4 games of prior season
     prior_late = prior_epa[
         (prior_epa["season"] == target_season - 1)
         & (prior_epa["week"] >= 15)
@@ -1699,9 +1822,8 @@ def compute_smart_epa_for_week(target_season: int, target_week: int,
     )
     prior_snap["season"] = target_season
     prior_snap["week"] = target_week
-    prior_snap["prior_games_played"] = 4  # treated as 4 games so it passes min_games=2..4
+    prior_snap["prior_games_played"] = 4
 
-    # If a team is in both current and prior snapshots, prefer current (has this-year games)
     have_current = set(current_snapshot["team"].tolist())
     prior_only = prior_snap[~prior_snap["team"].isin(have_current)]
 
@@ -1955,16 +2077,17 @@ has_odds_key = bool(ODDS_API_KEY)
 header_banner("live" if has_odds_key else "warn")
 
 # Build tabs list — admin gets an extra Admin panel tab
-tab_labels = ["THIS WEEK'S PICKS", "📊 TRACK RECORD", "BET TRACKING", "HISTORICAL BACKTEST"]
+tab_labels = ["THIS WEEK'S PICKS", "🏆 2026 LIVE RESULTS", "📊 TRACK RECORD", "BET TRACKING", "HISTORICAL BACKTEST"]
 if is_admin:
     tab_labels.append("⚙️ ADMIN")
 
 _tabs = st.tabs(tab_labels)
 mode_picks = _tabs[0]
-mode_record = _tabs[1]
-mode_track = _tabs[2]
-mode_bt = _tabs[3]
-mode_admin = _tabs[4] if is_admin else None
+mode_results = _tabs[1]
+mode_record = _tabs[2]
+mode_track = _tabs[3]
+mode_bt = _tabs[4]
+mode_admin = _tabs[5] if is_admin else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2093,38 +2216,31 @@ with mode_picks:
             weekly_epa = compute_smart_epa_for_week(
                 selected_season, selected_week, min_games_seen
             )
-            # If empty, fall back to standard prior-season compute
-            if len(weekly_epa) == 0:
-                weekly_epa = compute_lagged_epa((selected_season - 1,))
-                # Force season/week to match target so merge works
-                weekly_epa = weekly_epa[
-                    weekly_epa["season"] == selected_season - 1
-                ].copy()
-                weekly_epa["season"] = selected_season
-                weekly_epa["week"] = selected_week
-                st.info(f"Using {selected_season - 1} EPA data as fallback (no {selected_season} data yet).")
         except Exception as e:
-            if selected_season > 2020:
-                try:
-                    weekly_epa = compute_lagged_epa((selected_season - 1,))
-                    weekly_epa = weekly_epa[
-                        weekly_epa["season"] == selected_season - 1
-                    ].copy()
-                    weekly_epa["season"] = selected_season
-                    weekly_epa["week"] = selected_week
-                    st.warning(f"Using {selected_season - 1} EPA data as fallback: {e}")
-                except Exception as e2:
-                    st.error(f"EPA load failed: {e2}")
-                    st.stop()
-            else:
-                st.error(f"EPA load: {e}")
-                st.stop()
+            weekly_epa = pd.DataFrame()
+            st.warning(f"EPA computation hit an error — falling back to raw slate view. ({e})")
+
+        if len(weekly_epa) == 0:
+            st.markdown(
+                f'<div class="warn-banner">'
+                f'<strong>No {selected_season} EPA data available yet.</strong> '
+                f'nflverse hasn\'t posted {selected_season} play-by-play, or no team has enough prior games. '
+                f'Showing raw slate below with lines + weather so you can still read the board.'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
     scored = score_games(
         week_games, weekly_epa,
         epa_threshold, spread_min, spread_max, rest_days, late_week, min_games_seen,
         require_result=False
     )
+
+    # Dedupe by game identity and reset index — merges from live odds + schedule
+    # can leave duplicate rows or stale indexes, which cause widget-key collisions
+    # that render the same card over and over as the user scrolls.
+    if len(scored) > 0 and "home_team" in scored.columns and "away_team" in scored.columns:
+        scored = scored.drop_duplicates(subset=["home_team", "away_team"], keep="first").reset_index(drop=True)
 
     # QB injury filter — current-week live only (don't disturb backtest)
     scored["sharp_qb_info"] = [{} for _ in range(len(scored))]
@@ -2181,7 +2297,12 @@ with mode_picks:
             unsafe_allow_html=True,
         )
 
-        for _, row in week_games.iterrows():
+        # Dedupe to avoid rendering the same game twice (merge artifacts)
+        _fb = week_games.copy()
+        if "home_team" in _fb.columns and "away_team" in _fb.columns:
+            _fb = _fb.drop_duplicates(subset=["home_team", "away_team"], keep="first").reset_index(drop=True)
+
+        for _, row in _fb.iterrows():
             home = row.get("home_team", "?")
             away = row.get("away_team", "?")
             spread = row.get("spread_line", np.nan)
@@ -2357,27 +2478,34 @@ with mode_picks:
         st.markdown(card_html, unsafe_allow_html=True)
 
     def render_bet_form(row, source, key_prefix):
+        # Build STABLE unique key from game identity, not DataFrame index
+        # (indexes duplicate after merges, causing Streamlit widget collisions
+        # that render the same card over and over)
+        home = str(row.get("home_team", "?"))
+        away = str(row.get("away_team", "?"))
+        uid = f"{key_prefix}_{selected_season}_{selected_week}_{home}_{away}"
+
         with st.expander(f"LOG BET ON {row['sharp_side']}"):
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 bet_amount = st.number_input(
                     "Amount ($)", value=default_amount, step=10.0, min_value=1.0,
-                    key=f"amt_{key_prefix}_{row.name}"
+                    key=f"amt_{uid}"
                 )
             with c2:
                 bet_odds = st.number_input(
                     "Odds", value=default_odds, step=5,
-                    key=f"odds_{key_prefix}_{row.name}"
+                    key=f"odds_{uid}"
                 )
             with c3:
                 bet_book = st.text_input(
                     "Book", value=default_book,
-                    key=f"book_{key_prefix}_{row.name}"
+                    key=f"book_{uid}"
                 )
             with c4:
                 st.write("")
                 st.write("")
-                if st.button("LOG BET", key=f"log_{key_prefix}_{row.name}", width="stretch"):
+                if st.button("LOG BET", key=f"log_{uid}", width="stretch"):
                     game_date = row.get('gameday', pd.NaT)
                     game_date_str = game_date.strftime("%a %m/%d") if pd.notna(game_date) else "TBD"
                     add_bet({
@@ -2485,6 +2613,236 @@ with mode_picks:
         for _, row in not_triggered.sort_values("factor_score", ascending=False).iterrows():
             render_pick_card(row, is_watch=False, is_not_triggered=True)
             render_bet_form(row, "manual", "not")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MODE 1.4 — 2026 LIVE RESULTS (auto-settled from nflverse)
+# ═══════════════════════════════════════════════════════════════════════════
+with mode_results:
+    st.markdown(
+        f'<h3 style="color:{MUSTARD}; font-family: \'Playfair Display\', serif; text-transform: none;">'
+        f'2026 Season — Live Results by Factor Score'
+        f'</h3>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<p style="color:{CREAM}; font-family: \'Cormorant Garamond\', serif; font-size: 15px;">'
+        f'Every logged pick, auto-settled against the final box score. See how each factor-score tier is '
+        f'actually performing in real time — exactly like the backtest, but on live games.'
+        f'</p>',
+        unsafe_allow_html=True,
+    )
+
+    # Settle picks against nflverse scores
+    with st.spinner("Settling results from nflverse scores..."):
+        try:
+            picks_2026 = settle_picks_history(2026)
+        except Exception as e:
+            st.error(f"Settlement failed: {e}")
+            picks_2026 = load_picks_history()
+
+    if len(picks_2026) == 0:
+        st.markdown(
+            f'<div class="info-banner">'
+            f'<strong>No 2026 picks logged yet.</strong> Head to THIS WEEK\'S PICKS and let the system '
+            f'score the slate — picks are auto-logged. Results will populate here as games finish.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        p26 = picks_2026[picks_2026["season"] == 2026].copy()
+
+        # Dedupe — repeated snapshot writes can leave duplicate rows
+        if "home_team" in p26.columns and "away_team" in p26.columns and "week" in p26.columns:
+            p26 = p26.drop_duplicates(
+                subset=["season", "week", "home_team", "away_team"], keep="last"
+            ).reset_index(drop=True)
+
+        # Normalize factor_score to int (it may come back as float from CSV)
+        p26["factor_score"] = pd.to_numeric(p26["factor_score"], errors="coerce").fillna(-1).astype(int)
+
+        settled = p26[p26["ats_result"].isin(["COVER", "NO_COVER", "PUSH"])].copy()
+        pending = p26[~p26["ats_result"].isin(["COVER", "NO_COVER", "PUSH"])].copy()
+
+        # ── TOP SUMMARY STRIP
+        total_logged = len(p26)
+        total_settled = len(settled)
+        total_pending = len(pending)
+
+        if total_settled == 0:
+            st.markdown(
+                f'<div class="info-banner">'
+                f'<strong>{total_logged} picks logged, 0 settled yet.</strong> Results populate every '
+                f'Tuesday after Monday Night Football wraps and nflverse pushes the week\'s box scores.'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            all_c = int((settled["ats_result"] == "COVER").sum())
+            all_nc = int((settled["ats_result"] == "NO_COVER").sum())
+            all_p = int((settled["ats_result"] == "PUSH").sum())
+            all_dec = all_c + all_nc
+            all_rate = (all_c / all_dec) if all_dec > 0 else 0
+            all_units = all_c * 1.0 - all_nc * 1.1
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1: st.metric("PICKS SETTLED", f"{total_settled}")
+            with c2: st.metric("OVERALL RECORD", f"{all_c}–{all_nc}–{all_p}")
+            with c3: st.metric("OVERALL COVER", f"{all_rate:.1%}" if all_dec > 0 else "—")
+            with c4: st.metric("UNITS (@ -110)", f"{all_units:+.1f}u")
+
+        st.markdown("---")
+
+        # ── BY FACTOR SCORE — 4 tiles (0/3, 1/3, 2/3, 3/3)
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px; margin-top: 16px;">BREAKDOWN BY FACTOR SCORE</h4>',
+            unsafe_allow_html=True,
+        )
+
+        tier_cols = st.columns(4)
+        for i, col in enumerate(tier_cols):
+            tier = i  # 0, 1, 2, 3
+            tier_df = settled[settled["factor_score"] == tier]
+            t_c = int((tier_df["ats_result"] == "COVER").sum())
+            t_nc = int((tier_df["ats_result"] == "NO_COVER").sum())
+            t_p = int((tier_df["ats_result"] == "PUSH").sum())
+            t_dec = t_c + t_nc
+            t_rate = (t_c / t_dec) if t_dec > 0 else 0
+            t_units = t_c * 1.0 - t_nc * 1.1
+            tier_pending = int((p26[p26["factor_score"] == tier]["ats_result"].isna()
+                                | ~p26[p26["factor_score"] == tier]["ats_result"].isin(["COVER", "NO_COVER", "PUSH"])).sum())
+
+            label_suffix = " ★" if tier == 3 else ""
+            with col:
+                st.metric(
+                    label=f"SCORE {tier}/3{label_suffix}",
+                    value=f"{t_rate:.1%}" if t_dec > 0 else "—",
+                    delta=f"{t_c}-{t_nc}-{t_p} ({len(tier_df)} settled)",
+                    delta_color="off",
+                )
+
+        # Compact table underneath the tiles
+        tier_rows = []
+        for tier in [3, 2, 1, 0]:
+            tier_all = p26[p26["factor_score"] == tier]
+            tier_set = settled[settled["factor_score"] == tier]
+            t_c = int((tier_set["ats_result"] == "COVER").sum())
+            t_nc = int((tier_set["ats_result"] == "NO_COVER").sum())
+            t_p = int((tier_set["ats_result"] == "PUSH").sum())
+            t_dec = t_c + t_nc
+            t_rate = (t_c / t_dec) if t_dec > 0 else np.nan
+            t_units = t_c * 1.0 - t_nc * 1.1
+            tier_rows.append({
+                "Tier": f"{tier}/3" + (" ★ TRIGGER" if tier == 3 else (" WATCH" if tier == 2 else "")),
+                "Logged": len(tier_all),
+                "Settled": len(tier_set),
+                "Pending": len(tier_all) - len(tier_set),
+                "Record": f"{t_c}–{t_nc}–{t_p}",
+                "Cover Rate": f"{t_rate:.1%}" if not pd.isna(t_rate) else "—",
+                "Units": f"{t_units:+.1f}u" if t_dec > 0 else "—",
+            })
+        st.dataframe(pd.DataFrame(tier_rows), width="stretch", hide_index=True)
+
+        st.markdown("---")
+
+        # ── CUMULATIVE UNITS CHART (3/3 Triggers only — the actionable tier)
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px;">★ 3/3 TRIGGERS — CUMULATIVE UNITS</h4>',
+            unsafe_allow_html=True,
+        )
+        trig_settled = settled[settled["factor_score"] == 3].copy()
+        if len(trig_settled) > 0:
+            trig_settled = trig_settled.sort_values(["week"]).copy()
+            trig_settled["unit_result"] = trig_settled["ats_result"].map({
+                "COVER": 1.0, "NO_COVER": -1.1, "PUSH": 0.0
+            })
+            trig_settled["cum_units"] = trig_settled["unit_result"].cumsum()
+            trig_settled["pick_num"] = range(1, len(trig_settled) + 1)
+            chart_df = pd.DataFrame({
+                "Pick #": trig_settled["pick_num"],
+                "Cumulative Units": trig_settled["cum_units"],
+            })
+            st.line_chart(chart_df.set_index("Pick #"))
+        else:
+            st.info("No 3/3 triggers settled yet. Chart will populate as triggered picks resolve.")
+
+        # ── WEEK-BY-WEEK BREAKDOWN
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px;">WEEK-BY-WEEK (3/3 TRIGGERS)</h4>',
+            unsafe_allow_html=True,
+        )
+        if len(trig_settled) > 0:
+            wk_rows = []
+            for wk in sorted(trig_settled["week"].unique()):
+                wk_df = trig_settled[trig_settled["week"] == wk]
+                w_c = int((wk_df["ats_result"] == "COVER").sum())
+                w_nc = int((wk_df["ats_result"] == "NO_COVER").sum())
+                w_p = int((wk_df["ats_result"] == "PUSH").sum())
+                w_units = w_c * 1.0 - w_nc * 1.1
+                wk_rows.append({
+                    "Week": int(wk),
+                    "Triggers": len(wk_df),
+                    "Record": f"{w_c}–{w_nc}–{w_p}",
+                    "Units": f"{w_units:+.1f}u",
+                })
+            st.dataframe(pd.DataFrame(wk_rows), width="stretch", hide_index=True)
+        else:
+            st.caption("Weekly breakdown appears once 3/3 triggered picks settle.")
+
+        st.markdown("---")
+
+        # ── FULL PICK LIST
+        st.markdown(
+            f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+            f'letter-spacing: 2px;">EVERY 2026 PICK</h4>',
+            unsafe_allow_html=True,
+        )
+        # Admin sees factor scores; subscriber doesn't
+        if is_admin:
+            cols = ["week", "sharp_side", "opponent", "location", "sharp_spread",
+                    "F1_epa", "F2_line_proxy", "F3_situational", "factor_score",
+                    "trigger_fired", "qb_disqualified",
+                    "ats_result", "cover_margin"]
+        else:
+            cols = ["week", "sharp_side", "opponent", "location", "sharp_spread",
+                    "factor_score", "ats_result", "cover_margin"]
+        disp = p26[[c for c in cols if c in p26.columns]].copy()
+        disp = disp.sort_values(["week", "factor_score"], ascending=[False, False])
+        if "sharp_spread" in disp.columns:
+            disp["sharp_spread"] = pd.to_numeric(disp["sharp_spread"], errors="coerce").round(1)
+        if "cover_margin" in disp.columns:
+            disp["cover_margin"] = pd.to_numeric(disp["cover_margin"], errors="coerce").round(1)
+        rename_map = {
+            "week": "Wk", "sharp_side": "Pick", "opponent": "Opp", "location": "Loc",
+            "sharp_spread": "Spread",
+            "F1_epa": "F1", "F2_line_proxy": "F2", "F3_situational": "F3",
+            "factor_score": "Score", "trigger_fired": "Trig",
+            "qb_disqualified": "QB DQ",
+            "ats_result": "Result", "cover_margin": "Margin",
+        }
+        disp = disp.rename(columns=rename_map)
+        st.dataframe(disp, width="stretch", hide_index=True, height=400)
+
+        # Export + admin re-settle
+        c1, c2 = st.columns(2)
+        with c1:
+            csv_out = p26.to_csv(index=False)
+            st.download_button(
+                "📥 EXPORT 2026 PICKS",
+                csv_out,
+                f"mov_2026_picks_{datetime.now():%Y%m%d}.csv",
+                "text/csv",
+                width="stretch",
+            )
+        if is_admin:
+            with c2:
+                if st.button("🔄 FORCE RE-SETTLE", width="stretch",
+                             help="Clear the settlement cache and re-pull nflverse scores"):
+                    st.cache_data.clear()
+                    st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
