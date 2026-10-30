@@ -1227,6 +1227,142 @@ def log_picks_snapshot(scored_df: pd.DataFrame, season: int, week: int):
         pass  # non-fatal — don't break the app if writing fails
 
 
+def backfill_season_picks(season: int, epa_thresh: float, sp_min: float, sp_max: float,
+                           rest: int, late: int, min_prior: int) -> tuple:
+    """
+    Retroactively score every completed week of a season and write to
+    picks_history.csv. Used when early-season weeks weren't logged live
+    (e.g. the app had broken EPA until mid-season).
+
+    Returns (weeks_logged, picks_written).
+    """
+    try:
+        schedules = load_schedules()
+    except Exception as e:
+        return 0, 0
+
+    season_sched = schedules[schedules["season"] == season].copy()
+    if len(season_sched) == 0:
+        return 0, 0
+
+    # Only backfill weeks where ALL games are completed
+    done_weeks = (
+        season_sched[season_sched["home_score"].notna()]
+        .groupby("week")
+        .size()
+    )
+    total_weeks = season_sched.groupby("week").size()
+    completed_weeks = [
+        int(wk) for wk in sorted(done_weeks.index)
+        if done_weeks.get(wk, 0) == total_weeks.get(wk, 0)
+    ]
+
+    if not completed_weeks:
+        return 0, 0
+
+    # Load full-season EPA once (uses lagged rolling, no look-ahead)
+    try:
+        weekly_epa = compute_lagged_epa((season,))
+    except Exception:
+        return 0, 0
+
+    existing = load_picks_history()
+    if len(existing) > 0:
+        existing_keys = set(
+            zip(existing["season"], existing["week"], existing["home_team"], existing["away_team"])
+        )
+    else:
+        existing_keys = set()
+
+    weeks_logged = 0
+    picks_written = 0
+
+    for wk in completed_weeks:
+        wk_games = season_sched[season_sched["week"] == wk].copy()
+        if len(wk_games) == 0:
+            continue
+
+        # Score with final results so ats_result also gets computed
+        try:
+            scored = score_games(
+                wk_games, weekly_epa,
+                epa_thresh, sp_min, sp_max, rest, late, min_prior,
+                require_result=True
+            )
+        except Exception:
+            continue
+
+        if len(scored) == 0:
+            continue
+
+        # Dedupe by game identity
+        scored = scored.drop_duplicates(subset=["home_team", "away_team"], keep="first").reset_index(drop=True)
+
+        # Filter to only new picks (skip games already in picks_history)
+        new_rows = []
+        now = datetime.now().isoformat(timespec="seconds")
+        for _, row in scored.iterrows():
+            key = (season, wk, row["home_team"], row["away_team"])
+            if key in existing_keys:
+                continue
+            # Compute ats_result + cover_margin from the backtest result
+            ats_result = row.get("ats_result", np.nan)
+            if ats_result == "COVER":
+                cover_margin = float(row.get("ats_diff", 0) or 0)
+            elif ats_result == "NO_COVER":
+                cover_margin = float(row.get("ats_diff", 0) or 0)
+            elif ats_result == "PUSH":
+                cover_margin = 0.0
+            else:
+                cover_margin = np.nan
+                ats_result = np.nan
+
+            new_rows.append({
+                "logged_at": now,
+                "season": season,
+                "week": wk,
+                "game_date": row.get("gameday", pd.NaT),
+                "home_team": row.get("home_team"),
+                "away_team": row.get("away_team"),
+                "sharp_side": row.get("sharp_side"),
+                "opponent": row.get("opponent"),
+                "location": row.get("location"),
+                "sharp_spread": row.get("sharp_spread"),
+                "consensus_total": row.get("total_line", np.nan),
+                "epa_gap": row.get("epa_gap_abs"),
+                "rest_advantage": row.get("rest_advantage"),
+                "is_divisional": row.get("is_divisional"),
+                "F1_epa": row.get("F1_epa"),
+                "F2_line_proxy": row.get("F2_line_proxy"),
+                "F3_situational": row.get("F3_situational"),
+                "factor_score": row.get("factor_score"),
+                "trigger_fired": row.get("trigger_fired"),
+                "sharp_qb_starter": None,  # unknown retroactively
+                "sharp_qb_status": None,
+                "qb_disqualified": 0,
+                "ats_result": ats_result,
+                "cover_margin": cover_margin,
+            })
+            existing_keys.add(key)
+            picks_written += 1
+
+        if new_rows:
+            new_df = pd.DataFrame(new_rows)
+            combined = pd.concat([existing, new_df], ignore_index=True)
+            if {"season", "week", "home_team", "away_team"}.issubset(combined.columns):
+                combined = combined.drop_duplicates(
+                    subset=["season", "week", "home_team", "away_team"], keep="last"
+                ).reset_index(drop=True)
+            try:
+                combined.to_csv(PICKS_FILE, index=False)
+                existing = combined
+                weeks_logged += 1
+            except Exception:
+                pass
+
+    return weeks_logged, picks_written
+
+
 @st.cache_data(show_spinner=False, ttl=1800)
 def settle_picks_history(season: int) -> pd.DataFrame:
     """
@@ -2879,6 +3015,35 @@ with mode_results:
                              help="Clear the settlement cache and re-pull nflverse scores"):
                     st.cache_data.clear()
                     st.rerun()
+
+        if is_admin:
+            st.markdown("---")
+            st.markdown(
+                f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
+                f'letter-spacing: 2px;">ADMIN · BACKFILL EARLY SEASON</h4>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<p style="color:{SAGE}; font-family: \'Cormorant Garamond\', serif;'
+                f'font-style: italic; font-size: 13px;">'
+                f'Retroactively score and log every completed 2026 week using the current '
+                f'factor thresholds. Use this once to populate Weeks 1-7 that weren\'t logged '
+                f'live. Idempotent — safely re-runnable.'
+                f'</p>',
+                unsafe_allow_html=True,
+            )
+            if st.button("⚡ BACKFILL 2026 WEEKS 1-7", width="stretch", key="backfill_2026"):
+                with st.spinner("Backfilling 2026 season — scoring every completed week..."):
+                    weeks_logged, picks_written = backfill_season_picks(
+                        2026, epa_threshold, spread_min, spread_max,
+                        rest_days, late_week, min_games_seen
+                    )
+                if picks_written > 0:
+                    st.success(f"Backfilled {weeks_logged} week(s) · {picks_written} picks logged with ATS results.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.info("Nothing new to backfill — all completed weeks already in picks_history.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
