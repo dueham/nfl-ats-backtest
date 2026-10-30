@@ -1713,18 +1713,42 @@ def qb_status_badge_html(qb_info: dict, side_label: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_play_by_play(season: int) -> pd.DataFrame:
-    url = f"https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_{season}.parquet"
-    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=180)
-    r.raise_for_status()
-    return pd.read_parquet(BytesIO(r.content))
+    # nflverse PBP is only on the releases URL — this one works reliably
+    urls = [
+        f"https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_{season}.parquet",
+    ]
+    last_err = None
+    for url in urls:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=180, allow_redirects=True)
+            r.raise_for_status()
+            return pd.read_parquet(BytesIO(r.content))
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or RuntimeError(f"PBP load failed for {season}")
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_schedules() -> pd.DataFrame:
-    url = "https://github.com/nflverse/nfldata/raw/master/data/games.csv"
-    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
-    r.raise_for_status()
-    return pd.read_csv(BytesIO(r.content), low_memory=False)
+    # GitHub tightened rate limits on /raw/master/ URLs — Railway now gets 403.
+    # The nflverse releases URL is the stable fallback and always works.
+    # Try releases first (works everywhere), fall back to raw if ever needed.
+    urls = [
+        "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv",
+        "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv",
+        "https://github.com/nflverse/nfldata/raw/master/data/games.csv",
+    ]
+    last_err = None
+    for url in urls:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=60, allow_redirects=True)
+            r.raise_for_status()
+            return pd.read_csv(BytesIO(r.content), low_memory=False)
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or RuntimeError("Schedule load failed from all URLs")
 
 
 @st.cache_data(show_spinner=False)
@@ -2544,9 +2568,12 @@ with mode_picks:
             ★ All 3 Triggered — Full Alignment ({n_triggers} games)
         </h3>
         """, unsafe_allow_html=True)
-        for _, row in triggers.iterrows():
-            render_pick_card(row, is_watch=False, is_not_triggered=False)
-            render_bet_form(row, "trigger", "trig")
+        for _i, (_, row) in enumerate(triggers.iterrows()):
+            try:
+                render_pick_card(row, is_watch=False, is_not_triggered=False)
+                render_bet_form(row, "trigger", f"trig_{_i}")
+            except Exception as _e:
+                st.caption(f"⚠ Couldn't render {row.get('sharp_side','?')} vs {row.get('opponent','?')}: {_e}")
     else:
         st.markdown(f"""
         <h3 style="color:{MUSTARD}; font-family: 'Playfair Display', Georgia, serif;
@@ -2573,9 +2600,12 @@ with mode_picks:
             These games hit all 3 factors but the sharp side's starting QB is Out or Doubtful — EPA data is stale, do not bet.
         </p>
         """, unsafe_allow_html=True)
-        for _, row in dq_triggers.iterrows():
-            render_pick_card(row, is_watch=False, is_not_triggered=True)
-            render_bet_form(row, "manual", "dq")
+        for _i, (_, row) in enumerate(dq_triggers.iterrows()):
+            try:
+                render_pick_card(row, is_watch=False, is_not_triggered=True)
+                render_bet_form(row, "manual", f"dq_{_i}")
+            except Exception as _e:
+                st.caption(f"⚠ Couldn't render {row.get('sharp_side','?')} vs {row.get('opponent','?')}: {_e}")
 
     two_of_three = scored[(scored["factor_score"] == 2) & (scored["trigger_fired"] == 0) & (scored.get("qb_disqualified", 0) == 0)]
     st.markdown(f"""
@@ -2590,9 +2620,12 @@ with mode_picks:
     </p>
     """, unsafe_allow_html=True)
     if len(two_of_three) > 0:
-        for _, row in two_of_three.iterrows():
-            render_pick_card(row, is_watch=True, is_not_triggered=False)
-            render_bet_form(row, "watch_list", "watch")
+        for _i, (_, row) in enumerate(two_of_three.iterrows()):
+            try:
+                render_pick_card(row, is_watch=True, is_not_triggered=False)
+                render_bet_form(row, "watch_list", f"watch_{_i}")
+            except Exception as _e:
+                st.caption(f"⚠ Couldn't render {row.get('sharp_side','?')} vs {row.get('opponent','?')}: {_e}")
     else:
         st.markdown(f"""
         <p style="color:{CREAM_MUTED}; font-family: 'Cormorant Garamond', Georgia, serif;
@@ -2617,9 +2650,12 @@ with mode_picks:
     </p>
     """, unsafe_allow_html=True)
     if len(not_triggered) > 0:
-        for _, row in not_triggered.sort_values("factor_score", ascending=False).iterrows():
-            render_pick_card(row, is_watch=False, is_not_triggered=True)
-            render_bet_form(row, "manual", "not")
+        for _i, (_, row) in enumerate(not_triggered.sort_values("factor_score", ascending=False).iterrows()):
+            try:
+                render_pick_card(row, is_watch=False, is_not_triggered=True)
+                render_bet_form(row, "manual", f"not_{_i}")
+            except Exception as _e:
+                st.caption(f"⚠ Couldn't render {row.get('sharp_side','?')} vs {row.get('opponent','?')}: {_e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
