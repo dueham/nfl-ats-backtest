@@ -1777,89 +1777,82 @@ def compute_lagged_epa(seasons_tuple: tuple) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def compute_smart_epa_for_week(target_season: int, target_week: int,
-                                min_games: int) -> pd.DataFrame:
-    """
-    Return a per-team EPA snapshot appropriate for scoring the target week.
-
-    Logic:
-      - Try current-season PBP first.
-      - If current-season PBP is unavailable (common early in season — nflverse
-        hasn't posted the file yet), fall back entirely to prior season's late
-        EPA (weeks 15-18 avg) tagged with target (season, week).
-      - For weeks 1-2 with min_games >= 2, blend prior season's late EPA for
-        any teams that don't yet have the required current-season games.
-    """
-    # Try current-season EPA — may fail with 404 if nflverse hasn't posted yet
-    current_snapshot = pd.DataFrame()
-    current_available = True
-    try:
-        current_epa = compute_lagged_epa((target_season,))
-        current_snapshot = current_epa[
-            (current_epa["season"] == target_season)
-            & (current_epa["week"] == target_week)
-        ].copy()
-    except Exception:
-        current_available = False
-
-    # Full fallback: current-season PBP doesn't exist → use prior season entirely
-    if not current_available or len(current_snapshot) == 0:
-        try:
-            prior_epa = compute_lagged_epa((target_season - 1,))
-            prior_late = prior_epa[
-                (prior_epa["season"] == target_season - 1)
-                & (prior_epa["week"] >= 15)
-            ]
-            if len(prior_late) == 0:
-                # Fall back further: use any week we have
-                prior_late = prior_epa[prior_epa["season"] == target_season - 1]
-            if len(prior_late) == 0:
-                return pd.DataFrame()
-            prior_snap = (
-                prior_late.groupby("team")
-                .agg({"net_epa": "mean", "off_epa": "mean", "def_epa": "mean"})
-                .reset_index()
-                .rename(columns={"net_epa": "rolling_net_epa"})
-            )
-            prior_snap["season"] = target_season
-            prior_snap["week"] = target_week
-            prior_snap["prior_games_played"] = 4
-            return prior_snap
-        except Exception:
-            return pd.DataFrame()
-
-    # Week 3+ or min_games < 2 → current-season only
-    if target_week >= 3 or min_games < 2:
-        return current_snapshot
-
-    # Weeks 1-2 with min_games >= 2 — blend prior season for missing teams
+def _prior_season_snapshot(target_season: int, target_week: int) -> pd.DataFrame:
+    """Return each team's prior-season Weeks 15-18 average EPA as a snapshot."""
     try:
         prior_epa = compute_lagged_epa((target_season - 1,))
     except Exception:
-        return current_snapshot
-
+        return pd.DataFrame()
     prior_late = prior_epa[
         (prior_epa["season"] == target_season - 1)
         & (prior_epa["week"] >= 15)
     ]
     if len(prior_late) == 0:
-        return current_snapshot
-
-    prior_snap = (
+        prior_late = prior_epa[prior_epa["season"] == target_season - 1]
+    if len(prior_late) == 0:
+        return pd.DataFrame()
+    snap = (
         prior_late.groupby("team")
         .agg({"net_epa": "mean", "off_epa": "mean", "def_epa": "mean"})
         .reset_index()
         .rename(columns={"net_epa": "rolling_net_epa"})
     )
-    prior_snap["season"] = target_season
-    prior_snap["week"] = target_week
-    prior_snap["prior_games_played"] = 4
+    snap["season"] = target_season
+    snap["week"] = target_week
+    snap["prior_games_played"] = 4
+    return snap
 
-    have_current = set(current_snapshot["team"].tolist())
-    prior_only = prior_snap[~prior_snap["team"].isin(have_current)]
 
-    combined = pd.concat([current_snapshot, prior_only], ignore_index=True)
-    return combined
+def compute_smart_epa_for_week(target_season: int, target_week: int,
+                                min_games: int) -> pd.DataFrame:
+    """
+    Return a per-team EPA snapshot appropriate for scoring games in `target_week`.
+
+    Fix: for an UPCOMING week, nflverse weekly table has 0 or very few rows at
+    that week (only teams whose Thursday game already finished). We need each
+    team's rolling EPA from their LATEST played week carried forward, not a
+    slice at exact week==target_week.
+    """
+    # Try current-season PBP
+    current_epa = pd.DataFrame()
+    try:
+        current_epa = compute_lagged_epa((target_season,))
+        current_epa = current_epa[current_epa["season"] == target_season].copy()
+    except Exception:
+        current_epa = pd.DataFrame()
+
+    # Full fallback: no current season data at all
+    if len(current_epa) == 0:
+        return _prior_season_snapshot(target_season, target_week)
+
+    # Take each team's MOST RECENT weekly row (latest played week). That's
+    # their rolling EPA going INTO the upcoming target week.
+    latest = (
+        current_epa.sort_values(["team", "week"])
+        .groupby("team", as_index=False)
+        .tail(1)
+        .copy()
+    )
+    # Retag with target week so the merge in score_games finds them
+    latest["season"] = target_season
+    latest["week"] = target_week
+
+    # Any teams missing from current season? Fill with prior season average
+    # (common early-season: a team on bye all year so far, or Week 1-2)
+    all_teams_prior = _prior_season_snapshot(target_season, target_week)
+    if len(all_teams_prior) > 0:
+        have_current = set(latest["team"].tolist())
+        missing = all_teams_prior[~all_teams_prior["team"].isin(have_current)]
+        if len(missing) > 0:
+            latest = pd.concat([latest, missing], ignore_index=True)
+
+    # Make sure prior_games_played is numeric and reasonable so score_games
+    # min_games filter passes correctly
+    latest["prior_games_played"] = pd.to_numeric(
+        latest["prior_games_played"], errors="coerce"
+    ).fillna(4).astype(int)
+
+    return latest
 
 
 def get_current_nfl_context(schedules_df: pd.DataFrame) -> tuple:
