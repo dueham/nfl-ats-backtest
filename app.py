@@ -1583,7 +1583,8 @@ def fetch_live_odds() -> pd.DataFrame:
         # raising "Cannot compare tz-naive and tz-aware" TypeErrors.
         df["commence_time"] = pd.to_datetime(df["commence_time"], errors="coerce", utc=True)
         try:
-            df["commence_time"] = df["commence_time"].dt.tz_localize(None)
+            # Convert UTC → Eastern first so display times are correct
+            df["commence_time"] = df["commence_time"].dt.tz_convert("America/New_York").dt.tz_localize(None)
         except (TypeError, AttributeError):
             pass
     return df
@@ -1631,7 +1632,7 @@ def filter_odds_to_week(live_odds: pd.DataFrame, schedules_df: pd.DataFrame,
         # Odds API returns tz-aware UTC timestamps; strip tz for naive comparison
         odds["commence_time"] = pd.to_datetime(odds["commence_time"], errors="coerce", utc=True)
         try:
-            odds["commence_time"] = odds["commence_time"].dt.tz_localize(None)
+            odds["commence_time"] = odds["commence_time"].dt.tz_convert("America/New_York").dt.tz_localize(None)
         except (TypeError, AttributeError):
             pass
         return odds[
@@ -1956,10 +1957,17 @@ def compute_smart_epa_for_week(target_season: int, target_week: int,
     """
     Return a per-team EPA snapshot appropriate for scoring games in `target_week`.
 
-    Fix: for an UPCOMING week, nflverse weekly table has 0 or very few rows at
-    that week (only teams whose Thursday game already finished). We need each
-    team's rolling EPA from their LATEST played week carried forward, not a
-    slice at exact week==target_week.
+    The lagged `rolling_net_epa` from compute_lagged_epa uses shift(1), which
+    for the backtest ensures game N is scored using only weeks 1..(N-1). But
+    for an UPCOMING week's live view, using the last played week's shifted
+    value means the snapshot is effectively two weeks behind — it misses the
+    most recent completed week's performance.
+
+    Fix: compute a NON-SHIFTED rolling that represents "data available through
+    each team's most recent completed game." For Week N+1 live, this uses the
+    team's last 4 net_epa values (through Week N), which matches what the
+    backfill uses for scoring Week N+1 historically — eliminating the
+    discrepancy between live and backfill trigger identification.
     """
     # Try current-season PBP
     current_epa = pd.DataFrame()
@@ -1973,42 +1981,61 @@ def compute_smart_epa_for_week(target_season: int, target_week: int,
     if len(current_epa) == 0:
         return _prior_season_snapshot(target_season, target_week)
 
-    # Take each team's MOST RECENT weekly row (latest played week). That's
-    # their rolling EPA going INTO the upcoming target week.
-    latest = (
+    # For each team, compute the rolling mean of net_epa over their last 4
+    # played weeks (unshifted). This represents the EPA "going into" an
+    # upcoming week — the same view the backfill uses when it scores the
+    # next week's games from the shifted lag of that week's row.
+    team_rolling = (
         current_epa.sort_values(["team", "week"])
         .groupby("team", as_index=False)
-        .tail(1)
-        .copy()
+        .apply(lambda g: pd.Series({
+            "rolling_net_epa": g["net_epa"].tail(4).mean(),
+            "off_epa": g["off_epa"].tail(4).mean(),
+            "def_epa": g["def_epa"].tail(4).mean(),
+            "net_epa": g["net_epa"].tail(4).mean(),
+            "prior_games_played": int(len(g)),
+        }), include_groups=False)
+        .reset_index()
     )
-    # Retag with target week so the merge in score_games finds them
-    latest["season"] = target_season
-    latest["week"] = target_week
+    # Clean up the groupby index artifact
+    if "level_0" in team_rolling.columns:
+        team_rolling = team_rolling.drop(columns="level_0")
+
+    team_rolling["season"] = target_season
+    team_rolling["week"] = target_week
 
     # Any teams missing from current season? Fill with prior season average
-    # (common early-season: a team on bye all year so far, or Week 1-2)
     all_teams_prior = _prior_season_snapshot(target_season, target_week)
     if len(all_teams_prior) > 0:
-        have_current = set(latest["team"].tolist())
+        have_current = set(team_rolling["team"].tolist())
         missing = all_teams_prior[~all_teams_prior["team"].isin(have_current)]
         if len(missing) > 0:
-            latest = pd.concat([latest, missing], ignore_index=True)
+            team_rolling = pd.concat([team_rolling, missing], ignore_index=True)
 
-    # Make sure prior_games_played is numeric and reasonable so score_games
-    # min_games filter passes correctly
-    latest["prior_games_played"] = pd.to_numeric(
-        latest["prior_games_played"], errors="coerce"
+    team_rolling["prior_games_played"] = pd.to_numeric(
+        team_rolling["prior_games_played"], errors="coerce"
     ).fillna(4).astype(int)
 
-    return latest
+    return team_rolling
 
 
 def get_current_nfl_context(schedules_df: pd.DataFrame) -> tuple:
-    today = pd.Timestamp.now().normalize()
+    """
+    Return (season, week) for what the picker should default to.
+
+    Logic: find the SOONEST upcoming game that hasn't kicked off yet.
+    Giving a game a 6-hour grace window after scheduled kickoff keeps the
+    current slate visible while games are in progress but rolls over to
+    the next week once the entire slate is done (e.g. Tuesday morning
+    after Monday Night Football finishes).
+    """
+    now = pd.Timestamp.now()
     if "gameday" in schedules_df.columns:
         sd = schedules_df.copy()
         sd["gameday"] = pd.to_datetime(sd["gameday"], errors="coerce")
-        upcoming = sd[sd["gameday"] >= today - pd.Timedelta(days=1)]
+        # Count a game as "upcoming" if its gameday is within the next 7 days
+        # AND we're within 6 hours past its start (grace for in-progress games).
+        upcoming = sd[sd["gameday"] >= now - pd.Timedelta(hours=6)]
         if len(upcoming) > 0:
             next_game = upcoming.sort_values("gameday").iloc[0]
             return int(next_game["season"]), int(next_game["week"])
@@ -2334,7 +2361,7 @@ with mode_picks:
             # Odds API returns tz-aware UTC timestamps; strip tz for naive comparison
             live["commence_time"] = pd.to_datetime(live["commence_time"], errors="coerce", utc=True)
             try:
-                live["commence_time"] = live["commence_time"].dt.tz_localize(None)
+                live["commence_time"] = live["commence_time"].dt.tz_convert("America/New_York").dt.tz_localize(None)
             except (TypeError, AttributeError):
                 pass
             today_ts = pd.Timestamp.now().normalize()
