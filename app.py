@@ -1578,7 +1578,14 @@ def fetch_live_odds() -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
     if len(df) > 0:
-        df["commence_time"] = pd.to_datetime(df["commence_time"], errors="coerce")
+        # Odds API returns tz-aware UTC timestamps. Strip tz so downstream
+        # comparisons against tz-naive today/schedule datetimes work without
+        # raising "Cannot compare tz-naive and tz-aware" TypeErrors.
+        df["commence_time"] = pd.to_datetime(df["commence_time"], errors="coerce", utc=True)
+        try:
+            df["commence_time"] = df["commence_time"].dt.tz_localize(None)
+        except (TypeError, AttributeError):
+            pass
     return df
 
 
@@ -1621,7 +1628,12 @@ def filter_odds_to_week(live_odds: pd.DataFrame, schedules_df: pd.DataFrame,
         cutoff_start = today - pd.Timedelta(days=1)
         cutoff_end = today + pd.Timedelta(days=8)
         odds = live_odds.copy()
-        odds["commence_time"] = pd.to_datetime(odds["commence_time"], errors="coerce")
+        # Odds API returns tz-aware UTC timestamps; strip tz for naive comparison
+        odds["commence_time"] = pd.to_datetime(odds["commence_time"], errors="coerce", utc=True)
+        try:
+            odds["commence_time"] = odds["commence_time"].dt.tz_localize(None)
+        except (TypeError, AttributeError):
+            pass
         return odds[
             (odds["commence_time"] >= cutoff_start)
             & (odds["commence_time"] <= cutoff_end)
@@ -2319,7 +2331,12 @@ with mode_picks:
         if len(live) == 0:
             # Fallback: if no schedule match, take date window +/- 8 days
             live = live_odds.copy()
-            live["commence_time"] = pd.to_datetime(live["commence_time"], errors="coerce")
+            # Odds API returns tz-aware UTC timestamps; strip tz for naive comparison
+            live["commence_time"] = pd.to_datetime(live["commence_time"], errors="coerce", utc=True)
+            try:
+                live["commence_time"] = live["commence_time"].dt.tz_localize(None)
+            except (TypeError, AttributeError):
+                pass
             today_ts = pd.Timestamp.now().normalize()
             live = live[
                 (live["commence_time"] >= today_ts - pd.Timedelta(days=1))
