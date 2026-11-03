@@ -3064,30 +3064,64 @@ with mode_results:
             st.markdown("---")
             st.markdown(
                 f'<h4 style="color:{CREAM}; font-family: \'Barlow Condensed\', sans-serif;'
-                f'letter-spacing: 2px;">ADMIN · BACKFILL EARLY SEASON</h4>',
+                f'letter-spacing: 2px;">ADMIN · REBUILD TRACK RECORD</h4>',
                 unsafe_allow_html=True,
             )
             st.markdown(
                 f'<p style="color:{SAGE}; font-family: \'Cormorant Garamond\', serif;'
                 f'font-style: italic; font-size: 13px;">'
-                f'Retroactively score and log every completed 2026 week using the current '
-                f'factor thresholds. Use this once to populate Weeks 1-7 that weren\'t logged '
-                f'live. Idempotent — safely re-runnable.'
+                f'<strong style="color:{BLOOD_RED};">Wipe & Rebuild:</strong> clears all 2026 picks '
+                f'from picks_history and re-scores every completed week with the current fixed '
+                f'EPA logic. Use this after an EPA/scoring bug fix so every pick is scored '
+                f'consistently. Does NOT touch your bets (bets.csv).<br><br>'
+                f'<strong style="color:{MUSTARD};">Backfill Only:</strong> adds missing weeks '
+                f'without touching anything already logged.'
                 f'</p>',
                 unsafe_allow_html=True,
             )
-            if st.button("⚡ BACKFILL 2026 WEEKS 1-7", width="stretch", key="backfill_2026"):
-                with st.spinner("Backfilling 2026 season — scoring every completed week..."):
-                    weeks_logged, picks_written = backfill_season_picks(
-                        2026, epa_threshold, spread_min, spread_max,
-                        rest_days, late_week, min_games_seen
-                    )
-                if picks_written > 0:
-                    st.success(f"Backfilled {weeks_logged} week(s) · {picks_written} picks logged with ATS results.")
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.info("Nothing new to backfill — all completed weeks already in picks_history.")
+
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                if st.button("⚡ BACKFILL ONLY (SAFE)", width="stretch", key="backfill_2026"):
+                    with st.spinner("Backfilling missing weeks..."):
+                        weeks_logged, picks_written = backfill_season_picks(
+                            2026, epa_threshold, spread_min, spread_max,
+                            rest_days, late_week, min_games_seen
+                        )
+                    if picks_written > 0:
+                        st.success(f"Backfilled {weeks_logged} week(s) · {picks_written} picks logged.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.info("Nothing new to backfill.")
+            with bc2:
+                if st.button("🔥 WIPE & REBUILD 2026", width="stretch", key="wipe_rebuild_2026",
+                             help="Clears all 2026 picks from history and re-scores every completed week with the current fixed EPA logic"):
+                    # Confirm via session state two-click pattern
+                    if st.session_state.get("wipe_confirm") == "2026":
+                        with st.spinner("Wiping and re-scoring all 2026 weeks with fixed EPA logic..."):
+                            # Wipe 2026 from picks_history
+                            picks = load_picks_history()
+                            if len(picks) > 0:
+                                remaining = picks[picks["season"] != 2026].copy()
+                                try:
+                                    remaining.to_csv(PICKS_FILE, index=False)
+                                except Exception as e:
+                                    st.error(f"Wipe failed: {e}")
+                                    st.stop()
+                            # Clear cache so backfill sees fresh state
+                            st.cache_data.clear()
+                            # Re-backfill from scratch
+                            weeks_logged, picks_written = backfill_season_picks(
+                                2026, epa_threshold, spread_min, spread_max,
+                                rest_days, late_week, min_games_seen
+                            )
+                        st.session_state.pop("wipe_confirm", None)
+                        st.success(f"Rebuilt 2026 · {weeks_logged} week(s) · {picks_written} picks logged with fresh EPA.")
+                        st.rerun()
+                    else:
+                        st.session_state["wipe_confirm"] = "2026"
+                        st.warning("⚠️ Click again to CONFIRM: this wipes all 2026 picks_history and rebuilds from scratch.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
