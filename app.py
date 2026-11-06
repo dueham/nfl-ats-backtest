@@ -2352,6 +2352,188 @@ mode_admin = _tabs[5] if is_admin else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PDF GENERATION (admin-only weekly picks export)
+# ═══════════════════════════════════════════════════════════════════════════
+def generate_week_pdf(scored_df: pd.DataFrame, season: int, week: int) -> bytes:
+    """
+    Build a single-page landscape PDF of this week's picks for admin download.
+    Returns PDF bytes ready for st.download_button.
+    """
+    try:
+        from reportlab.lib.pagesizes import landscape, letter
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    except ImportError:
+        return b""
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(letter),
+        topMargin=0.3 * inch, bottomMargin=0.3 * inch,
+        leftMargin=0.3 * inch, rightMargin=0.3 * inch,
+    )
+    story = []
+
+    # Brand colors (match app)
+    forest_deep = colors.HexColor("#0F2818")
+    forest_mid = colors.HexColor("#1B3A26")
+    mustard = colors.HexColor("#D4A537")
+    cream = colors.HexColor("#F5F1E8")
+    bright_green = colors.HexColor("#5CB85C")
+    blood_red = colors.HexColor("#8B2635")
+    sage = colors.HexColor("#8FB89A")
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "title", parent=styles["Title"],
+        fontName="Helvetica-Bold", fontSize=20, textColor=mustard,
+        alignment=TA_CENTER, spaceAfter=4,
+    )
+    subtitle_style = ParagraphStyle(
+        "sub", parent=styles["Normal"],
+        fontName="Helvetica", fontSize=10, textColor=forest_deep,
+        alignment=TA_CENTER, spaceAfter=10,
+    )
+
+    story.append(Paragraph("MARGIN of VICTORY", title_style))
+    story.append(Paragraph(
+        f"Season {season} · Week {week} · {datetime.now():%A, %B %d, %Y %I:%M %p CT}",
+        subtitle_style
+    ))
+
+    # Build table: Game / Time / Spread / O/U / F1 / F2 / F3 / Score / Pick / Status
+    header = ["Game", "Kickoff", "Spread", "O/U", "F1", "F2", "F3", "Score", "Pick", "Status"]
+    data = [header]
+
+    # Sort: triggers first, then watch (2/3), then 1/3, then 0/3
+    sort_col = scored_df.copy()
+    sort_col["_sortkey"] = sort_col.get("trigger_fired", 0) * 10 + sort_col.get("factor_score", 0)
+    sort_col = sort_col.sort_values("_sortkey", ascending=False)
+
+    row_styles = []  # tuples of (row_idx, bg_color)
+    for i, (_, r) in enumerate(sort_col.iterrows(), start=1):
+        away = r.get("away_team", "?")
+        home = r.get("home_team", "?")
+        game_label = f"{away} @ {home}"
+        gd = r.get("gameday", pd.NaT)
+        if pd.notna(gd):
+            try:
+                kickoff = pd.to_datetime(gd).strftime("%a %m/%d %I:%M%p")
+            except Exception:
+                kickoff = "TBD"
+        else:
+            kickoff = "TBD"
+
+        spread = r.get("sharp_spread", np.nan)
+        spread_txt = f"{spread:+.1f}" if pd.notna(spread) else "—"
+        total = r.get("consensus_total", np.nan)
+        total_txt = f"{total:.1f}" if pd.notna(total) else "—"
+        f1 = "✓" if r.get("F1_epa") == 1 else "✗"
+        f2 = "✓" if r.get("F2_line_proxy") == 1 else "✗"
+        f3 = "✓" if r.get("F3_situational") == 1 else "✗"
+        score = f"{int(r.get('factor_score', 0))}/3"
+
+        sharp = r.get("sharp_side", "?")
+        opp = r.get("opponent", "?")
+        loc = "VS" if r.get("sharp_is_home") else "@"
+        pick = f"{sharp} {spread_txt} {loc} {opp}"
+
+        # Status
+        trigger = r.get("trigger_fired", 0) == 1
+        qb_dq = r.get("qb_disqualified", 0) == 1
+        intl_dq = r.get("intl_fav_dq", 0) == 1
+        bb_dq = r.get("bounceback_opp_dq", 0) == 1
+        is_intl = r.get("is_intl_game", 0) == 1
+        sharp_bb = r.get("sharp_is_bounceback", 0) == 1
+
+        if trigger:
+            status = "★ TRIGGER"
+            row_styles.append((i, bright_green))
+        elif qb_dq:
+            status = "QB DQ"
+            row_styles.append((i, blood_red))
+        elif intl_dq:
+            status = "INTL FAV DQ"
+            row_styles.append((i, blood_red))
+        elif bb_dq:
+            status = "OPP BB DQ"
+            row_styles.append((i, blood_red))
+        elif r.get("factor_score", 0) == 2:
+            status = "WATCH"
+            row_styles.append((i, mustard))
+        else:
+            status = ""
+
+        if is_intl and not status.startswith("INTL"):
+            status = ("INTL · " + status).strip(" ·") if status else "INTL"
+        if sharp_bb:
+            status = ("BB SHARP · " + status).strip(" ·") if status else "BB SHARP"
+
+        data.append([game_label, kickoff, spread_txt, total_txt, f1, f2, f3, score, pick, status])
+
+    # Table
+    col_widths = [1.1 * inch, 1.1 * inch, 0.7 * inch, 0.5 * inch, 0.35 * inch, 0.35 * inch,
+                  0.35 * inch, 0.5 * inch, 1.8 * inch, 1.5 * inch]
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+
+    tstyle = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), forest_deep),
+        ("TEXTCOLOR", (0, 0), (-1, 0), mustard),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 9),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 1), (-1, -1), 8),
+        ("ALIGN", (2, 1), (7, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#2C5138")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [cream, colors.HexColor("#EDE8DA")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ])
+    # Apply row-specific colors for triggers / DQs / watch
+    for ridx, bgcolor in row_styles:
+        tstyle.add("BACKGROUND", (9, ridx), (9, ridx), bgcolor)  # status column
+        if bgcolor == bright_green:
+            tstyle.add("TEXTCOLOR", (9, ridx), (9, ridx), forest_deep)
+            tstyle.add("FONTNAME", (9, ridx), (9, ridx), "Helvetica-Bold")
+        elif bgcolor == blood_red:
+            tstyle.add("TEXTCOLOR", (9, ridx), (9, ridx), cream)
+            tstyle.add("FONTNAME", (9, ridx), (9, ridx), "Helvetica-Bold")
+        elif bgcolor == mustard:
+            tstyle.add("TEXTCOLOR", (9, ridx), (9, ridx), forest_deep)
+            tstyle.add("FONTNAME", (9, ridx), (9, ridx), "Helvetica-Bold")
+
+    tbl.setStyle(tstyle)
+    story.append(tbl)
+
+    # Footer legend
+    footer_style = ParagraphStyle(
+        "footer", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=7, textColor=sage, alignment=TA_CENTER, spaceBefore=6,
+    )
+    story.append(Paragraph(
+        "F1 EPA Gap ≥ 0.12 · F2 Line Movement Proxy · F3 Situational Edge · "
+        "Triggers = all 3 aligned + spread 3.0-10.0 · "
+        "DQ rules: QB out · International favorite fade (29% cover) · "
+        "Opponent bounceback (63% cover)",
+        footer_style
+    ))
+    story.append(Paragraph(
+        f"MARGIN of VICTORY by Ron Zellers · movplaybook.com · Generated {datetime.now():%Y-%m-%d %H:%M} CT",
+        footer_style
+    ))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MODE 1 — THIS WEEK'S PICKS
 # ═══════════════════════════════════════════════════════════════════════════
 with mode_picks:
@@ -2690,6 +2872,24 @@ with mode_picks:
         <p>SEASON {selected_season} · WK {selected_week} · {len(scored)} GAMES SCORED</p>
     </div>
     """, unsafe_allow_html=True)
+
+    # Admin-only: download full week as single-page PDF
+    if is_admin:
+        try:
+            pdf_bytes = generate_week_pdf(scored, selected_season, selected_week)
+            if pdf_bytes:
+                st.download_button(
+                    label=f"📄 DOWNLOAD WEEK {selected_week} PDF (ADMIN)",
+                    data=pdf_bytes,
+                    file_name=f"mov_week{selected_week}_{selected_season}_{datetime.now():%Y%m%d}.pdf",
+                    mime="application/pdf",
+                    width="stretch",
+                    key=f"pdf_dl_{selected_season}_{selected_week}",
+                )
+            else:
+                st.caption("📄 PDF export requires reportlab — add `reportlab>=4.0.0` to requirements.txt and redeploy.")
+        except Exception as _pdfe:
+            st.caption(f"📄 PDF generation error: {_pdfe}")
 
     def render_pick_card(row, is_watch=False, is_not_triggered=False):
         game_date = row.get('gameday', pd.NaT)
