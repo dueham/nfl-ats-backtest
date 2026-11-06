@@ -2043,6 +2043,68 @@ def get_current_nfl_context(schedules_df: pd.DataFrame) -> tuple:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# INTERNATIONAL GAME EDGES
+# ═══════════════════════════════════════════════════════════════════════════
+# Research (2022-2026, n=34 international games):
+#   - Favorite cover rate in international games: 29.4% (10 of 34)
+#   - Underdog cover rate in international games: 70.6% (24 of 34)
+#   - Bounceback team (returning from abroad, no bye) cover: 63.2% (24 of 38)
+#
+# Implications applied as post-score filters:
+#   1. In an international game, auto-fade the favorite → if sharp side is
+#      the favorite, DQ the trigger (intl_fade_dq).
+#   2. If the SHARP side is a bounceback team, confirm trigger. If the sharp
+#      side's OPPONENT is a bounceback team (returning from abroad), DQ
+#      the trigger — history says the bounceback team covers more.
+
+def _teams_that_played_intl_at_week(schedules_df: pd.DataFrame, season: int,
+                                      week: int) -> set:
+    """Return set of team abbreviations that played at a Neutral location
+    in the given season+week. Used to flag bounceback games the next week."""
+    if "location" not in schedules_df.columns:
+        return set()
+    wk = schedules_df[
+        (schedules_df["season"] == season)
+        & (schedules_df["week"] == week)
+        & (schedules_df["location"] == "Neutral")
+    ]
+    out = set()
+    for _, r in wk.iterrows():
+        if pd.notna(r.get("home_team")):
+            out.add(r["home_team"])
+        if pd.notna(r.get("away_team")):
+            out.add(r["away_team"])
+    return out
+
+
+def _team_played_in_week(schedules_df: pd.DataFrame, team: str, season: int,
+                          week: int) -> bool:
+    """True if `team` had a game scheduled for season+week (not a bye)."""
+    wk = schedules_df[
+        (schedules_df["season"] == season)
+        & (schedules_df["week"] == week)
+        & ((schedules_df["home_team"] == team) | (schedules_df["away_team"] == team))
+    ]
+    return len(wk) > 0
+
+
+def _is_bounceback_team(schedules_df: pd.DataFrame, team: str, season: int,
+                         current_week: int) -> bool:
+    """
+    True if `team` played at a Neutral location in the previous week
+    AND is playing (no bye) this week. That's the "bounceback" scenario:
+    jet lag + short prep + travel home.
+    """
+    if current_week <= 1:
+        return False
+    intl_teams_prev = _teams_that_played_intl_at_week(schedules_df, season, current_week - 1)
+    if team not in intl_teams_prev:
+        return False
+    # Playing this week (no bye)
+    return _team_played_in_week(schedules_df, team, season, current_week)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # FACTOR SCORING
 # ═══════════════════════════════════════════════════════════════════════════
 def score_games(games, weekly_epa, epa_thresh, sp_min, sp_max, rest, late, min_prior,
@@ -2471,6 +2533,57 @@ with mode_picks:
                 scored.at[idx, "qb_disqualified"] = 1
                 scored.at[idx, "trigger_fired"] = 0  # remove from triggers
 
+    # ── INTERNATIONAL GAME FILTERS ──────────────────────────────────────
+    # Research-backed edges:
+    #   - Favorites cover only 29.4% in international games (fade the fav)
+    #   - Bounceback teams cover 63.2% (back the returning team)
+    scored["is_intl_game"] = 0
+    scored["sharp_is_bounceback"] = 0
+    scored["opp_is_bounceback"] = 0
+    scored["intl_fav_dq"] = 0
+    scored["bounceback_opp_dq"] = 0
+
+    if len(scored) > 0:
+        # Attach location column from schedule if not already there
+        if "location" not in scored.columns:
+            loc_map = schedules_all[
+                ["season", "week", "home_team", "away_team", "location"]
+            ].drop_duplicates()
+            scored = scored.merge(
+                loc_map,
+                on=["season", "week", "home_team", "away_team"],
+                how="left",
+            )
+
+        for idx, r in scored.iterrows():
+            # Is THIS game at a neutral/international site?
+            if r.get("location") == "Neutral":
+                scored.at[idx, "is_intl_game"] = 1
+                # Fade the favorite: if sharp side is also the favorite, DQ
+                if r.get("sharp_is_favorite") and r.get("trigger_fired") == 1:
+                    scored.at[idx, "intl_fav_dq"] = 1
+                    scored.at[idx, "trigger_fired"] = 0
+
+            # Bounceback check — did sharp or opponent play abroad last week?
+            try:
+                sharp_bb = _is_bounceback_team(
+                    schedules_all, r["sharp_side"], int(r["season"]), int(r["week"])
+                )
+                opp_bb = _is_bounceback_team(
+                    schedules_all, r["opponent"], int(r["season"]), int(r["week"])
+                )
+                if sharp_bb:
+                    scored.at[idx, "sharp_is_bounceback"] = 1
+                if opp_bb:
+                    scored.at[idx, "opp_is_bounceback"] = 1
+                    # If sharp side opposes bounceback team AND trigger fires, DQ
+                    # (history says bounceback team covers 63%)
+                    if r.get("trigger_fired") == 1:
+                        scored.at[idx, "bounceback_opp_dq"] = 1
+                        scored.at[idx, "trigger_fired"] = 0
+            except Exception:
+                pass
+
     # Auto-log this week's snapshot for track-record persistence.
     # Guard with session state so we only write ONCE per session per week —
     # otherwise repeated writes on every rerun can trigger Streamlit's
@@ -2559,8 +2672,12 @@ with mode_picks:
 
     triggers = scored[scored["trigger_fired"] == 1]
     dq_triggers = scored[scored.get("qb_disqualified", 0) == 1] if "qb_disqualified" in scored.columns else pd.DataFrame()
+    intl_dq_triggers = scored[scored.get("intl_fav_dq", 0) == 1] if "intl_fav_dq" in scored.columns else pd.DataFrame()
+    bb_dq_triggers = scored[scored.get("bounceback_opp_dq", 0) == 1] if "bounceback_opp_dq" in scored.columns else pd.DataFrame()
     n_triggers = len(triggers)
     n_dq = len(dq_triggers)
+    n_intl_dq = len(intl_dq_triggers)
+    n_bb_dq = len(bb_dq_triggers)
 
     if n_triggers > 0:
         msg = f"★ {n_triggers} TRIGGER{'S' if n_triggers != 1 else ''} FIRED"
@@ -2621,16 +2738,36 @@ with mode_picks:
             qb_badges.append(sharp_badge)
         if opp_badge:
             qb_badges.append(opp_badge)
+        # International + bounceback badges
+        intl_badges = []
+        if row.get("is_intl_game") == 1:
+            intl_badges.append('<span class="qb-badge warn">🌍 INTL GAME</span>')
+        if row.get("sharp_is_bounceback") == 1:
+            intl_badges.append(f'<span class="qb-badge" style="background:#5CB85C; color:#0F2818;">🏃 {row["sharp_side"]} BOUNCEBACK</span>')
+        if row.get("opp_is_bounceback") == 1:
+            intl_badges.append(f'<span class="qb-badge dq">🏃 {row["opponent"]} BOUNCEBACK (OPP)</span>')
+        qb_badges.extend(intl_badges)
+
         qb_row_html = ""
         if qb_badges:
             qb_row_html = '<div class="qb-status-row">' + "".join(qb_badges) + '</div>'
 
         # Card class — apply dq-override styling if QB knocked out a trigger
         was_dq = row.get("qb_disqualified", 0) == 1
+        intl_fav_dq = row.get("intl_fav_dq", 0) == 1
+        bb_opp_dq = row.get("bounceback_opp_dq", 0) == 1
         if was_dq:
             card_class = "pick-card no dq-override"
             badge_class = "trigger-badge miss"
             badge_text = "❌ QB OUT · DQ"
+        elif intl_fav_dq:
+            card_class = "pick-card no dq-override"
+            badge_class = "trigger-badge miss"
+            badge_text = "🌍 INTL FAV · DQ"
+        elif bb_opp_dq:
+            card_class = "pick-card no dq-override"
+            badge_class = "trigger-badge miss"
+            badge_text = "🏃 OPP BOUNCEBACK · DQ"
         # Factor chips
         f1_c = "on" if row['F1_epa'] else "off"
         f2_c = "on" if row['F2_line_proxy'] else "off"
@@ -2780,7 +2917,48 @@ with mode_picks:
             except Exception as _e:
                 st.caption(f"⚠ Couldn't render {row.get('sharp_side','?')} vs {row.get('opponent','?')}: {_e}")
 
-    two_of_three = scored[(scored["factor_score"] == 2) & (scored["trigger_fired"] == 0) & (scored.get("qb_disqualified", 0) == 0)]
+    # DQ'd by international game favorite fade (29% fav cover rate)
+    if n_intl_dq > 0:
+        st.markdown(f"""
+        <h3 style="color:{BLOOD_RED}; font-family: 'Playfair Display', Georgia, serif;
+                   font-weight: 700; letter-spacing: 1px; text-transform: none;
+                   font-size: 22px; margin-top: 1.5rem;">
+            🌍 Disqualified · International Favorite Fade ({n_intl_dq} games)
+        </h3>
+        <p style="color:{CREAM_MUTED}; font-family: 'Cormorant Garamond', Georgia, serif;
+                  font-style: italic; margin-top: -0.5rem;">
+            Game is at a neutral/international site. Favorites cover only 29.4% historically (2022-2026) — fade the fav.
+        </p>
+        """, unsafe_allow_html=True)
+        for _i, (_, row) in enumerate(intl_dq_triggers.iterrows()):
+            try:
+                render_pick_card(row, is_watch=False, is_not_triggered=True)
+                render_bet_form(row, "manual", f"intl_dq_{_i}")
+            except Exception as _e:
+                st.caption(f"⚠ Couldn't render {row.get('sharp_side','?')} vs {row.get('opponent','?')}: {_e}")
+
+    # DQ'd because opponent is bounceback team (63% bounceback cover rate)
+    if n_bb_dq > 0:
+        st.markdown(f"""
+        <h3 style="color:{BLOOD_RED}; font-family: 'Playfair Display', Georgia, serif;
+                   font-weight: 700; letter-spacing: 1px; text-transform: none;
+                   font-size: 22px; margin-top: 1.5rem;">
+            🏃 Disqualified · Opponent Returning from Abroad ({n_bb_dq} games)
+        </h3>
+        <p style="color:{CREAM_MUTED}; font-family: 'Cormorant Garamond', Georgia, serif;
+                  font-style: italic; margin-top: -0.5rem;">
+            Sharp side opposes a team returning from international play. Those teams cover 63.2% historically — fade the trigger.
+        </p>
+        """, unsafe_allow_html=True)
+        for _i, (_, row) in enumerate(bb_dq_triggers.iterrows()):
+            try:
+                render_pick_card(row, is_watch=False, is_not_triggered=True)
+                render_bet_form(row, "manual", f"bb_dq_{_i}")
+            except Exception as _e:
+                st.caption(f"⚠ Couldn't render {row.get('sharp_side','?')} vs {row.get('opponent','?')}: {_e}")
+
+    two_of_three = scored[(scored["factor_score"] == 2) & (scored["trigger_fired"] == 0) & (scored.get("qb_disqualified", 0) == 0)
+                           & (scored.get("intl_fav_dq", 0) == 0) & (scored.get("bounceback_opp_dq", 0) == 0)]
     st.markdown(f"""
     <h3 style="color:{SAGE}; font-family: 'Playfair Display', Georgia, serif;
                font-weight: 700; letter-spacing: 1px; text-transform: none;
