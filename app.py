@@ -2365,7 +2365,7 @@ def generate_week_pdf(scored_df: pd.DataFrame, season: int, week: int) -> bytes:
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import inch
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
     except ImportError:
         return b""
 
@@ -2387,22 +2387,110 @@ def generate_week_pdf(scored_df: pd.DataFrame, season: int, week: int) -> bytes:
     sage = colors.HexColor("#8FB89A")
 
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "title", parent=styles["Title"],
-        fontName="Helvetica-Bold", fontSize=20, textColor=mustard,
-        alignment=TA_CENTER, spaceAfter=4,
+
+    # ── BOOK-COVER HEADER BANNER (matches website brand) ─────────────
+    kicker_style = ParagraphStyle(
+        "kicker", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=8, textColor=mustard, alignment=TA_LEFT, leading=10,
     )
-    subtitle_style = ParagraphStyle(
-        "sub", parent=styles["Normal"],
-        fontName="Helvetica", fontSize=10, textColor=forest_deep,
-        alignment=TA_CENTER, spaceAfter=10,
+    hero_style = ParagraphStyle(
+        "hero", parent=styles["Title"], fontName="Helvetica-Bold",
+        fontSize=26, textColor=cream, alignment=TA_LEFT, leading=28, spaceAfter=2,
+    )
+    byline_style = ParagraphStyle(
+        "byline", parent=styles["Normal"], fontName="Helvetica-Oblique",
+        fontSize=9, textColor=mustard, alignment=TA_LEFT, leading=11,
+    )
+    week_style = ParagraphStyle(
+        "wk", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=14, textColor=cream, alignment=TA_RIGHT, leading=16,
+    )
+    date_style = ParagraphStyle(
+        "dt", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=8, textColor=sage, alignment=TA_RIGHT, leading=10,
     )
 
-    story.append(Paragraph("MARGIN of VICTORY", title_style))
-    story.append(Paragraph(
-        f"Season {season} · Week {week} · {datetime.now():%A, %B %d, %Y %I:%M %p CT}",
-        subtitle_style
-    ))
+    hero_left = [
+        Paragraph("A DATA-DRIVEN NFL ATS SYSTEM", kicker_style),
+        Paragraph("MARGIN <i>of</i> VICTORY", hero_style),
+        Paragraph("by Ron Zellers &nbsp;·&nbsp; Companion App to the Book", byline_style),
+    ]
+    hero_right = [
+        Paragraph(f"WEEK {week}", week_style),
+        Paragraph(f"SEASON {season}", week_style),
+        Paragraph(f"{datetime.now():%a %b %d, %Y %I:%M %p CT}", date_style),
+    ]
+    hero_cell = Table(
+        [[hero_left, hero_right]],
+        colWidths=[6.5 * inch, 3.3 * inch],
+    )
+    hero_cell.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), forest_deep),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LINEABOVE", (0, 0), (-1, 0), 2, mustard),
+        ("LINEBELOW", (0, 0), (-1, 0), 2, mustard),
+    ]))
+    story.append(hero_cell)
+    story.append(Spacer(1, 0.1 * inch))
+
+    # ── YTD BREAKDOWN BY FACTOR SCORE ─────────────────────────────────
+    # Pull settled picks_history for this season and build the 4 tiles
+    try:
+        ytd_picks = settle_picks_history(season)
+    except Exception:
+        ytd_picks = load_picks_history()
+    if len(ytd_picks) > 0:
+        ytd = ytd_picks[ytd_picks["season"] == season].copy()
+        ytd["factor_score"] = pd.to_numeric(ytd["factor_score"], errors="coerce").fillna(-1).astype(int)
+        ytd_settled = ytd[ytd["ats_result"].isin(["COVER", "NO_COVER", "PUSH"])].copy()
+    else:
+        ytd_settled = pd.DataFrame()
+
+    ytd_header = [f"{season} SEASON TRACK RECORD — COVER RATE BY FACTOR SCORE"]
+    ytd_cells = []
+    ytd_row = []
+    for tier in [0, 1, 2, 3]:
+        tier_df = ytd_settled[ytd_settled["factor_score"] == tier] if len(ytd_settled) > 0 else pd.DataFrame()
+        t_c = int((tier_df["ats_result"] == "COVER").sum()) if len(tier_df) else 0
+        t_nc = int((tier_df["ats_result"] == "NO_COVER").sum()) if len(tier_df) else 0
+        t_p = int((tier_df["ats_result"] == "PUSH").sum()) if len(tier_df) else 0
+        t_dec = t_c + t_nc
+        t_rate = (t_c / t_dec) if t_dec > 0 else None
+        rate_txt = f"{t_rate*100:.1f}%" if t_rate is not None else "—"
+        label = f"SCORE {tier}/3" + (" ★" if tier == 3 else "")
+        record = f"{t_c}-{t_nc}-{t_p} ({len(tier_df)} settled)"
+        ytd_row.append(f"<b>{label}</b><br/><font size=14><b>{rate_txt}</b></font><br/>{record}")
+
+    para_style_tile = ParagraphStyle(
+        "tile", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=9, textColor=forest_deep, alignment=TA_CENTER, leading=13,
+    )
+    ytd_tiles = [[Paragraph(txt, para_style_tile) for txt in ytd_row]]
+    ytd_tbl = Table(ytd_tiles, colWidths=[2.45 * inch] * 4)
+    ytd_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), cream),
+        ("BOX", (0, 0), (-1, -1), 1.0, forest_mid),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, forest_mid),
+        ("LINEBEFORE", (0, 0), (0, -1), 3, mustard),
+        ("LINEBEFORE", (1, 0), (1, -1), 3, mustard),
+        ("LINEBEFORE", (2, 0), (2, -1), 3, mustard),
+        ("LINEBEFORE", (3, 0), (3, -1), 3, mustard),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+
+    ytd_header_style = ParagraphStyle(
+        "ytdhdr", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=9, textColor=mustard, alignment=TA_CENTER, spaceAfter=2, spaceBefore=4,
+    )
+    story.append(Paragraph(f"{season} SEASON · COVER RATE BY FACTOR SCORE", ytd_header_style))
+    story.append(ytd_tbl)
+    story.append(Spacer(1, 0.08 * inch))
 
     # Build table: Game / Time / Spread / O/U / F1 / F2 / F3 / Score / Pick / Status
     header = ["Game", "Kickoff", "Spread", "O/U", "F1", "F2", "F3", "Score", "Pick", "Status"]
@@ -2449,28 +2537,40 @@ def generate_week_pdf(scored_df: pd.DataFrame, season: int, week: int) -> bytes:
         is_intl = r.get("is_intl_game", 0) == 1
         sharp_bb = r.get("sharp_is_bounceback", 0) == 1
 
+        # Meaningful, action-oriented status with inline warnings
+        fscore = int(r.get("factor_score", 0))
         if trigger:
-            status = "★ TRIGGER"
+            status = "★ BET · TRIGGER"
             row_styles.append((i, bright_green))
         elif qb_dq:
-            status = "QB DQ"
+            status = "SKIP · QB OUT"
             row_styles.append((i, blood_red))
         elif intl_dq:
-            status = "INTL FAV DQ"
+            status = "SKIP · INTL FAV FADE"
             row_styles.append((i, blood_red))
         elif bb_dq:
-            status = "OPP BB DQ"
+            status = "SKIP · OPP BOUNCEBACK"
             row_styles.append((i, blood_red))
-        elif r.get("factor_score", 0) == 2:
-            status = "WATCH"
+        elif fscore == 2:
+            status = "WATCH · OPTIONAL"
             row_styles.append((i, mustard))
+        elif fscore == 1:
+            status = "⚠ DO NOT BET"
+            row_styles.append((i, sage))
+        elif fscore == 0:
+            status = "⚠ DO NOT BET"
+            row_styles.append((i, sage))
         else:
             status = ""
 
-        if is_intl and not status.startswith("INTL"):
-            status = ("INTL · " + status).strip(" ·") if status else "INTL"
+        # Contextual tags prefix (international / bounceback indicators)
+        tags = []
+        if is_intl and not any(k in status for k in ("INTL",)):
+            tags.append("🌍 INTL")
         if sharp_bb:
-            status = ("BB SHARP · " + status).strip(" ·") if status else "BB SHARP"
+            tags.append("🏃 BB SHARP")
+        if tags:
+            status = f"{' · '.join(tags)} | {status}" if status else " · ".join(tags)
 
         data.append([game_label, kickoff, spread_txt, total_txt, f1, f2, f3, score, pick, status])
 
@@ -2518,14 +2618,9 @@ def generate_week_pdf(scored_df: pd.DataFrame, season: int, week: int) -> bytes:
         fontSize=7, textColor=sage, alignment=TA_CENTER, spaceBefore=6,
     )
     story.append(Paragraph(
-        "F1 EPA Gap ≥ 0.12 · F2 Line Movement Proxy · F3 Situational Edge · "
-        "Triggers = all 3 aligned + spread 3.0-10.0 · "
-        "DQ rules: QB out · International favorite fade (29% cover) · "
-        "Opponent bounceback (63% cover)",
-        footer_style
-    ))
-    story.append(Paragraph(
-        f"MARGIN of VICTORY by Ron Zellers · movplaybook.com · Generated {datetime.now():%Y-%m-%d %H:%M} CT",
+        "F1 EPA Gap ≥ 0.12 &nbsp;·&nbsp; F2 Line Movement Proxy &nbsp;·&nbsp; F3 Situational Edge &nbsp;·&nbsp; "
+        "Triggers = all 3 aligned + spread 3.0–10.0 &nbsp;·&nbsp; "
+        "DQ rules: QB out · International favorite fade (29% cover) · Opponent bounceback (63% cover)",
         footer_style
     ))
 
