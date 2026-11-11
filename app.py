@@ -1152,7 +1152,7 @@ PICKS_COLUMNS = [
     "sharp_spread", "consensus_total", "epa_gap",
     "rest_advantage", "is_divisional",
     "F1_epa", "F2_line_proxy", "F3_situational",
-    "factor_score", "trigger_fired",
+    "factor_score", "trigger_fired", "play_fired",
     "sharp_qb_starter", "sharp_qb_status", "qb_disqualified",
     "ats_result", "cover_margin",  # filled in later once games are settled
 ]
@@ -1208,6 +1208,7 @@ def log_picks_snapshot(scored_df: pd.DataFrame, season: int, week: int):
             "F3_situational": row.get("F3_situational"),
             "factor_score": row.get("factor_score"),
             "trigger_fired": row.get("trigger_fired"),
+            "play_fired": row.get("play_fired"),
             "sharp_qb_starter": sqb.get("starter"),
             "sharp_qb_status": sqb.get("status"),
             "qb_disqualified": row.get("qb_disqualified", 0),
@@ -1337,6 +1338,7 @@ def backfill_season_picks(season: int, epa_thresh: float, sp_min: float, sp_max:
                 "F3_situational": row.get("F3_situational"),
                 "factor_score": row.get("factor_score"),
                 "trigger_fired": row.get("trigger_fired"),
+                "play_fired": row.get("play_fired"),
                 "sharp_qb_starter": None,  # unknown retroactively
                 "sharp_qb_status": None,
                 "qb_disqualified": 0,
@@ -2179,6 +2181,13 @@ def score_games(games, weekly_epa, epa_thresh, sp_min, sp_max, rest, late, min_p
         & (g["abs_spread"] >= sp_min)
         & (g["abs_spread"] <= sp_max)
     ).astype(int)
+    # v9.2: 2-of-3 picks inside the spread band are now 1-unit "plays" (previously
+    # just a non-binding watch list). trigger_fired (3-of-3) is a 2-unit "double."
+    g["play_fired"] = (
+        (g["factor_score"] == 2)
+        & (g["abs_spread"] >= sp_min)
+        & (g["abs_spread"] <= sp_max)
+    ).astype(int)
 
     if require_result:
         g["home_margin"] = g["home_score"] - g["away_score"]
@@ -2540,7 +2549,8 @@ def generate_week_pdf(scored_df: pd.DataFrame, season: int, week: int) -> bytes:
         pick = f"{sharp} {spread_txt} {loc} {opp}"
 
         # Status
-        trigger = r.get("trigger_fired", 0) == 1
+        double = r.get("trigger_fired", 0) == 1   # 3-of-3 trigger = 2-unit double
+        play = r.get("play_fired", 0) == 1         # 2-of-3 in band = 1-unit play
         qb_dq = r.get("qb_disqualified", 0) == 1
         intl_dq = r.get("intl_fav_dq", 0) == 1
         bb_dq = r.get("bounceback_opp_dq", 0) == 1
@@ -2549,8 +2559,8 @@ def generate_week_pdf(scored_df: pd.DataFrame, season: int, week: int) -> bytes:
 
         # Meaningful, action-oriented status with inline warnings
         fscore = int(r.get("factor_score", 0))
-        if trigger:
-            status = "★ BET · TRIGGER"
+        if double:
+            status = "★★ DOUBLE · 2 UNITS"
             row_styles.append((i, bright_green))
         elif qb_dq:
             status = "SKIP · QB OUT"
@@ -2561,8 +2571,12 @@ def generate_week_pdf(scored_df: pd.DataFrame, season: int, week: int) -> bytes:
         elif bb_dq:
             status = "SKIP · OPP BOUNCEBACK"
             row_styles.append((i, blood_red))
+        elif play:
+            status = "★ PLAY · 1 UNIT"
+            row_styles.append((i, bright_green))
         elif fscore == 2:
-            status = "WATCH · OPTIONAL"
+            # 2-of-3 outside the spread band — still worth watching but not a play
+            status = "WATCH · OUTSIDE BAND"
             row_styles.append((i, mustard))
         elif fscore == 1:
             status = "⚠ DO NOT BET"
@@ -2816,9 +2830,10 @@ with mode_picks:
             scored.at[idx, "sharp_qb_info"] = sharp_qb
             scored.at[idx, "opp_qb_info"] = opp_qb
             # DQ only when sharp side has starter Out/Doubtful/etc AND it was a trigger
-            if sharp_qb.get("flag") == "dq" and r["trigger_fired"] == 1:
+            if sharp_qb.get("flag") == "dq" and (r.get("trigger_fired", 0) == 1 or r.get("play_fired", 0) == 1):
                 scored.at[idx, "qb_disqualified"] = 1
-                scored.at[idx, "trigger_fired"] = 0  # remove from triggers
+                scored.at[idx, "trigger_fired"] = 0  # remove from doubles
+                scored.at[idx, "play_fired"] = 0     # and plays
 
     # ── INTERNATIONAL GAME FILTERS ──────────────────────────────────────
     # Research-backed edges:
@@ -2847,9 +2862,10 @@ with mode_picks:
             if r.get("location") == "Neutral":
                 scored.at[idx, "is_intl_game"] = 1
                 # Fade the favorite: if sharp side is also the favorite, DQ
-                if r.get("sharp_is_favorite") and r.get("trigger_fired") == 1:
+                if r.get("sharp_is_favorite") and (r.get("trigger_fired", 0) == 1 or r.get("play_fired", 0) == 1):
                     scored.at[idx, "intl_fav_dq"] = 1
                     scored.at[idx, "trigger_fired"] = 0
+                    scored.at[idx, "play_fired"] = 0
 
             # Bounceback check — did sharp or opponent play abroad last week?
             try:
@@ -2863,11 +2879,12 @@ with mode_picks:
                     scored.at[idx, "sharp_is_bounceback"] = 1
                 if opp_bb:
                     scored.at[idx, "opp_is_bounceback"] = 1
-                    # If sharp side opposes bounceback team AND trigger fires, DQ
+                    # If sharp side opposes bounceback team AND trigger/play fires, DQ
                     # (history says bounceback team covers 63%)
-                    if r.get("trigger_fired") == 1:
+                    if r.get("trigger_fired", 0) == 1 or r.get("play_fired", 0) == 1:
                         scored.at[idx, "bounceback_opp_dq"] = 1
                         scored.at[idx, "trigger_fired"] = 0
+                        scored.at[idx, "play_fired"] = 0
             except Exception:
                 pass
 
