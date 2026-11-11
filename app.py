@@ -1893,7 +1893,17 @@ def load_schedules() -> pd.DataFrame:
         try:
             r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=60, allow_redirects=True)
             r.raise_for_status()
-            return pd.read_csv(BytesIO(r.content), low_memory=False)
+            df = pd.read_csv(BytesIO(r.content), low_memory=False)
+            # v9.0 FIX: Normalize nflverse's spread_line to standard betting convention.
+            # nflverse: positive spread_line = home team is FAVORED
+            # standard: negative spread_line = home team is FAVORED (what score_games assumes)
+            # Without this flip, backfill-scored picks were mislabeled (favorite/dog inverted),
+            # which inflated 2026 cover rate from ~55% to the observed 76%+ and flipped
+            # ats_result on ~20% of games. The live (Odds API) path already uses standard
+            # convention, so only backfill-sourced picks were affected.
+            if "spread_line" in df.columns:
+                df["spread_line"] = -df["spread_line"]
+            return df
         except Exception as e:
             last_err = e
             continue
