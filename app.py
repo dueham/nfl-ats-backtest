@@ -2278,10 +2278,10 @@ with st.sidebar:
     if is_admin:
         # ADMIN-ONLY: threshold sliders + API status + refresh button
         st.markdown("### Factor Thresholds")
-        epa_threshold = st.slider("F1: Net EPA Gap min", 0.05, 0.25, 0.12, 0.01)
+        epa_threshold = st.slider("F1: Net EPA Gap min", 0.05, 0.25, 0.10, 0.01)
         spread_min = st.slider("Spread band — min", 1.0, 7.0, 3.0, 0.5)
         spread_max = st.slider("Spread band — max", 6.0, 17.0, 10.0, 0.5)
-        rest_days = st.slider("F3a: Rest advantage (days)", 1, 7, 3, 1)
+        rest_days = st.slider("F3a: Rest advantage (days)", 1, 7, 1, 1)
         late_week = st.slider("F3c: Late season starts week", 10, 17, 14, 1)
         min_games_seen = st.slider("Min prior games / team", 1, 8, 1, 1)
 
@@ -2320,10 +2320,10 @@ with st.sidebar:
     else:
         # SUBSCRIBER: fixed system config, minimal display
         # Use the SAME defaults the admin sliders default to
-        epa_threshold = 0.12
+        epa_threshold = 0.10
         spread_min = 3.0
         spread_max = 10.0
-        rest_days = 3
+        rest_days = 1
         late_week = 14
         min_games_seen = 1
 
